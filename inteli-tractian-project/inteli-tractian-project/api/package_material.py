@@ -56,13 +56,13 @@ def build_agent_input() -> None:
     df = _load_cases()
     cases = [_row(r, INPUT_FIELDS) for _, r in df.iterrows()]
     (AGENT_INPUT_DIR / "cases.json").write_text(
-        json.dumps(cases, indent=2, ensure_ascii=False)
+        json.dumps(cases, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
     # O contrato da API também é visível ao agente (ele precisa saber os endpoints).
     contract_src = ROOT / "docs" / "api-contract.openapi.yaml"
     if contract_src.exists():
-        (AGENT_INPUT_DIR / "api-contract.openapi.yaml").write_text(contract_src.read_text())
+        (AGENT_INPUT_DIR / "api-contract.openapi.yaml").write_text(contract_src.read_text(encoding="utf-8"), encoding="utf-8")
 
     print(f"  agent-input/cases.json  ({len(cases)} casos, só campos de input)")
     print("  agent-input/api-contract.openapi.yaml  (cópia do contrato)")
@@ -74,13 +74,13 @@ def build_eval() -> None:
     df = _load_cases()
     expected = [_row(r, GABARITO_FIELDS) for _, r in df.iterrows()]
     (EVAL_DIR / "expected-paths.json").write_text(
-        json.dumps(expected, indent=2, ensure_ascii=False)
+        json.dumps(expected, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
     # Cenários comentados (trajetória + critério + métricas) — gabarito narrativo.
     scenarios_src = ROOT / "docs" / "test-scenarios.md"
     if scenarios_src.exists():
-        (EVAL_DIR / "test-scenarios.md").write_text(scenarios_src.read_text())
+        (EVAL_DIR / "test-scenarios.md").write_text(scenarios_src.read_text(encoding="utf-8"), encoding="utf-8")
 
     print(f"  eval/expected-paths.json  ({len(expected)} casos, gabarito)")
     print("  eval/test-scenarios.md  (cópia dos cenários comentados)")
