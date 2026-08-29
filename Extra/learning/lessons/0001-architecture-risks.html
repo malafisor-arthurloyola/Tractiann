@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L1 — Os 3 Riscos da Nossa Arquitetura</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <h1>L1 — Por que a nossa arquitetura tem 3 riscos (e o que vamos fazer)</h1>
+
+  <p>Antes de apertar o botão "construir", precisamos entender <strong>por que</strong> a
+  arquitetura que desenhamos no <code>AGENTS.md</code> tem 3 pontos de atenção. Estas são as
+  lições que o código vai recompensar a gente por ter entendido cedo.</p>
+
+  <h2>Revisão rápida (30s)</h2>
+  <div class="card">
+    Nosso sistema é <em>em camadas</em>:
+    <pre>Streamlit (UI) → Agente (LangGraph) → Tools (MCP) → API Tractian</pre>
+    O agente recebe um <strong>ticket</strong>, investiga dados, e decide entre
+    <strong>orientar</strong> / <strong>agir</strong> / <strong>escalar</strong>.
+    Cada camada é um <em>seam</em> (costura): um ponto onde uma peça pode ser trocada
+    sem quebrar as outras.
+  </div>
+
+  <h2>Risco 1 — A camada MCP é "rasa" (duplicação)</h2>
+  <span class="risk-badge">RISCO 1 · shallow module</span>
+  <p>As <strong>17 tools</strong> vão todas fazer a mesma dança:</p>
+  <ol>
+    <li>montar a <code>URL</code> do endpoint,</li>
+    <li>mandar o header <code>x-user-id</code>,</li>
+    <li>chamar o HTTP via <code>httpx</code>,</li>
+    <li>interpretar o <em>envelope</em> de resposta
+        (<code>complete/partial/inconclusive/conflict/unavailable</code>).</li>
+  </ol>
+  <p>Se cada tool reescrever essas 4 ações, temos um <strong>módulo raso</strong>: a
+  interface (jeito de usar) fica quase tão complexa quanto o que ela faz. E o pior: se a API
+  mudar o formato do envelope amanhã, temos que consertar <strong>17 lugares</strong> e quase
+  com certeza esqueceremos um.</p>
+  <div class="tip">
+    <strong>Solução:</strong> criar <strong>um único helper central</strong>
+    (<code>fetch_envelope</code>) que faz as 4 ações uma vez. As 17 tools ficam curtas:
+    dizem qual operação querem, recebem o envelope já tratado.
+  </div>
+  <div class="callout">
+    🎮 <strong>Minecraft:</strong> 17 fornalhas, cada uma precisando de carvão manualmente,
+    vira um único sistema de transporte de carvão que abastece todas. Trocar a fonte de
+    energia = mexer num lugar só.
+  </div>
+
+  <h2>Risco 2 — Quem decide quando a resposta vem "incompleta"?</h2>
+  <span class="risk-badge green">RISCO 2 · policy sem dono</span>
+  <p>A regra <em>"resposta incompleta → repetir, buscar dado faltante, ou escalonar"</em>
+  está escrita no briefing, mas <strong>não está definido em qual nó do grafo ela vive</strong>.
+  Sem um dono, ela se espalha por vários nós e fica inconsistente.</p>
+  <div class="tip">
+    <strong>Solução:</strong> um <strong>nó dedicado de "quality check"</strong> no grafo do
+    LangGraph. Toda resposta passa por ele: aceitar 🟢, repetir 🔄, ou buscar dado faltante
+    em outra tool. Uma sala só, regra centralizada.
+  </div>
+  <div class="callout">
+    🎮 <strong>Minecraft:</strong> a regra do vilarejo ("se o item vier quebrado, conserta ou
+    chama o ferreiro") precisa morar na casa de <strong>um</strong> morador. Se estiver
+    escrita em todas as portas, mudar a regra = reescrever tudo, e os moradores se
+    contradizem.
+  </div>
+
+  <h2>Risco 3 — Nada registra "por que decidimos isso"</h2>
+  <span class="risk-badge">RISCO 3 · sem registros</span>
+  <p>Dois documentos salvam o cérebro do projeto:</p>
+  <ul>
+    <li><code>CONTEXT.md</code> — <strong>glossário de domínio</strong>: define termos-chave
+        ("baseline" = o normal <em>daquele ativo específico</em>, não uma norma genérica).</li>
+    <li><code>docs/adr/</code> — <strong>registros de decisão</strong> (ADRs): por que escolhemos
+        Groq, por que MCP, etc.</li>
+  </ul>
+  <div class="callout">
+    🎮 <strong>Minecraft:</strong> o livro de encantamentos guarda o conhecimento do mundo;
+    o baú de anotações guarda o porquê. Sem eles, cada encantador (e cada IA futura)
+    interpreta os termos do jeito que quiser.
+  </div>
+
+  <h2>Compatto — o plano defensivo</h2>
+  <table>
+    <tr><th>Problema</th><th>O que vamos criar</th></tr>
+    <tr><td>MCP rasa</td><td><code>agent/tools/client.py</code> — helper central <code>fetch_envelope</code></td></tr>
+    <tr><td>Política sem dono</td><td>Nó <code>quality_check</code> no grafo</td></tr>
+    <tr><td>Sem registros</td><td><code>CONTEXT.md</code> + <code>docs/adr/</code></td></tr>
+  </table>
+
+  <div class="tip">
+    <strong>Para praticar (retrieval practice):</strong> antes de seguir, responda na sua cabeça:
+    (1) o que é um "módulo raso"? (2) onde a regra de resposta incompleta deve morar?
+    (3) qual a diferença entre <code>CONTEXT.md</code> e um ADR?
+  </div>
+
+  <p><em>Tem dúvida? Pergunte ao agente — ele é seu professor e pode explicar qualquer ponto
+  deste texto.</em></p>
+
+  <footer>
+    Lição 1 · Agente Industrial Tractian · <a href="../MISSION.md">Missão</a>
+  </footer>
+</body>
+</html>
