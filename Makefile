@@ -23,14 +23,22 @@ endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup deps data agent-env up up-api up-agent up-all stop logs test clean clean-data
+.PHONY: help setup deps data agent-env up up-api up-agent up-all stop logs test clean clean-data postgres-up postgres-down postgres-init eval run phoenix-up phoenix-down
 
 help: ## Mostra esta ajuda
-	@echo   setup      - Cria venv, instala dependências e gera dados
-	@echo   data       - Gera data/*.parquet, agent-input/, eval/
-	@echo   up         - Sobe a API industrial em :8000
-	@echo   stop       - Para a API e o agente
-	@echo   test       - Roda os testes unitários da API
+	@echo   setup        - Cria venv, instala dependências e gera dados
+	@echo   data         - Gera data/*.parquet, agent-input/, eval/
+	@echo   up           - Sobe a API industrial em :8000
+	@echo   stop         - Para a API e o agente
+	@echo   test         - Roda os testes unitários da API
+	@echo   postgres-up  - Sobe o Postgres do agente (:5432)
+	@echo   postgres-init- Cria a tabela execucoes no Postgres
+	@echo   postgres-down- Para o Postgres do agente
+	@echo   phoenix-up   - Sobe o Phoenix (tracing open source) :6006
+	@echo   phoenix-down - Para o Phoenix
+	@echo   eval         - Roda avaliação no TREINO (sem juiz LLM) — dev
+	@echo   run          - Roda avaliação no treino (com juiz LLM)
+	@echo   prova-final  - Roda o TESTE held-out (generalização, com juiz)
 
 setup: deps data
 	@echo "✓ Setup concluído!"
@@ -62,8 +70,44 @@ stop: ## Para API industrial e agente
 test: ## Roda os testes da API industrial
 	cd api && "$(PY)" -m pytest -q
 
-clean-data: ## Apaga dados gerados (data/, agent-input/, eval/) — regenere com make data
-	rm -rf data agent-input eval
+postgres-up: ## Sobe o Postgres do agente (:5432) via Docker
+	docker compose up -d postgres-agent
+	@echo "✓ Postgres no ar: postgresql://tractian:tractian_dev@localhost:5432/tractian_agent"
+
+postgres-init: ## Cria a tabela execucoes no Postgres
+	api\.venv\Scripts\python.exe -c "from agent.logging.postgres import init_db; print('tabela criada' if init_db() else 'FALHOU - Postgres indisponivel?')"
+
+postgres-down: ## Para o Postgres do agente
+	docker compose stop postgres-agent
+	@echo "✓ Postgres parado."
+
+phoenix-up: ## Sobe o Phoenix (tracing open source) :6006 via Docker
+	docker compose up -d phoenix
+	@echo "✓ Phoenix no ar: http://localhost:6006 (dashboard de tracing)"
+	@echo "  Lembra de setar PHOENIX_ENABLED=1 no agent/.env para instrumentar."
+
+phoenix-down: ## Para o Phoenix
+	docker compose stop phoenix
+	@echo "✓ Phoenix parado."
+
+eval: ## Roda a avaliação NO TREINO (sem juiz LLM) — desenvolvimento
+	api\.venv\Scripts\python.exe -m eval.runner --split train --no-judge
+
+run: ## Roda a avaliação completa (com juiz LLM) no treino
+	api\.venv\Scripts\python.exe -m eval.runner --split train
+
+prova-final: ## Roda o TESTE held-out (prova de generalização) com juiz LLM
+	api\.venv\Scripts\python.exe -m eval.runner --split test
+
+compare: ## Compara decisões entre versões no Postgres (make compare versaoA versaoB)
+	api\.venv\Scripts\python.exe -m eval.compare $(filter-out $@,$(MAKECMDGOALS))
+
+compare-versions: ## Lista versões/contagens gravadas no Postgres
+	api\.venv\Scripts\python.exe -m eval.compare --versions
+
+clean-data: ## Apaga dados gerados (data/, agent-input/, eval/*-generated) — regenere com make data
+	rm -rf data agent-input
+	rm -f eval/expected-paths.json eval/test-scenarios.md eval/results*.json
 	@echo "✓ dados apagados (rode make data para regenerar)"
 
 clean: stop clean-data ## Para tudo e apaga dados + venv

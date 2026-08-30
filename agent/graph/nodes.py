@@ -1,5 +1,6 @@
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from langgraph.types import interrupt
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -208,10 +209,23 @@ def decide(state: AgentState) -> dict:
     if gaps:
         parts.append(f"Lacunas de dados (importante considerar): {gaps}")
 
+    context_text = "\n".join(parts)
+
+    # Cache em disco: se este contexto já foi decidido antes, reusa (economiza token
+    # em re-execuções de dev/avaliação). Chave = hash do prompt.
+    cached = _cached_decision(context_text)
+    if cached is not None:
+        return {
+            "decision": cached[0],
+            "decision_justification": cached[1],
+            "response": cached[1],
+            "trace": [{"node": "decide", "decision": cached[0], "from_cache": True}],
+        }
+
     llm = _get_llm()
     response = llm.invoke([
         SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content="\n".join(parts)),
+        HumanMessage(content=context_text),
     ])
 
     text = response.content.lower()
@@ -222,12 +236,50 @@ def decide(state: AgentState) -> dict:
     else:
         decision = "orient"
 
+    _write_decision_cache(context_text, decision, response.content)
+
     return {
         "decision": decision,
         "decision_justification": response.content,
         "response": response.content,
         "trace": [{"node": "decide", "decision": decision}],
     }
+
+
+# --- Cache em disco de decisões (economiza tokens em re-execuções) ---
+
+_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".run" / "llm_cache"
+
+
+def _cache_key(context_text: str) -> str:
+    import hashlib
+    return hashlib.sha1(context_text.encode("utf-8")).hexdigest()
+
+
+def _cached_decision(context_text: str):
+    """Retorna (decision, response) em cache, ou None se não houver."""
+    try:
+        path = _CACHE_DIR / f"{_cache_key(context_text)}.json"
+        if not path.exists():
+            return None
+        import json
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data["decision"], data["response"]
+    except Exception:
+        return None
+
+
+def _write_decision_cache(context_text: str, decision: str, response: str) -> None:
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        import json
+        path = _CACHE_DIR / f"{_cache_key(context_text)}.json"
+        path.write_text(
+            json.dumps({"decision": decision, "response": response}),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 
 def respond(state: AgentState) -> dict:
@@ -239,10 +291,37 @@ def respond(state: AgentState) -> dict:
 
 
 def act(state: AgentState) -> dict:
-    """Nó de ação: executa ação na plataforma (placeholder — será integrado com interrupt)."""
+    """Nó de ação: pausa para confirmação humana antes de executar."""
+    decision = state.get("decision") or ""
+    justification = state.get("decision_justification") or ""
+    
+    # Antes de executar qualquer ação de impacto, pede confirmação humana
+    confirmed = interrupt({
+        "type": "action_confirmation",
+        "decision": decision,
+        "justification": justification[:500],
+        "asset_id": state.get("asset_id"),
+        "ticket_id": state.get("ticket_id"),
+        "gaps": state.get("data_gaps") or {},
+    })
+    
+    if not confirmed:
+        # Humano cancelou → escala em vez de agir
+        return {
+            "decision": "escalate",
+            "decision_justification": (
+                f"Ação '{decision}' cancelada pelo humano. "
+                f"Justificativa original: {justification[:200]}"
+            ),
+            "trace": [{"node": "act", "action": "cancelled_by_human",
+                       "original_decision": decision}],
+        }
+    
+    # Humano confirmou → registra que a ação foi executada
     return {
-        "trace": [{"node": "act", "action": state.get("decision"),
-                   "justification": (state.get("decision_justification") or "")[:120]}],
+        "trace": [{"node": "act", "action": decision,
+                   "justification": justification[:120],
+                   "confirmed_by": "human"}],
     }
 
 

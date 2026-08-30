@@ -1,4 +1,5 @@
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
 from .state import AgentState
 from .nodes import investigate, quality_check, decide, respond, act, escalate
 
@@ -89,7 +90,9 @@ def build_graph() -> StateGraph:
     graph.add_edge("act", END)
     graph.add_edge("escalate", END)
 
-    return graph.compile()
+    # MemorySaver persiste o estado do grafo, permitindo o interrupt() (HITL)
+    # pausar e depois retomar a execução de onde parou.
+    return graph.compile(checkpointer=MemorySaver())
 
 
 # Instância compilada do grafo

@@ -1,0 +1,25 @@
+{
+  "_comment": "Split treino/teste do agente, no espírito de ML (sem data leakage).",
+  "_regra": "O DESENVOLVIMENTO usa SÓ o treino. O teste é held-out: só roda na prova final, para medir generalização. Nunca ajuste o agente olhando o teste.",
+  "train": [
+    "case_tkt_inv_04",
+    "case_tkt_inv_05",
+    "case_tkt_inv_06",
+    "case_tkt_inv_07",
+    "case_tkt_inv_09",
+    "case_tkt_inv_10",
+    "case_tkt_inv_11",
+    "case_tkt_exe_12",
+    "case_tkt_exe_13",
+    "case_tkt_exe_15",
+    "case_tkt_exe_16",
+    "case_tkt_ctx_01",
+    "case_tkt_ctx_03"
+  ],
+  "test": [
+    "case_tkt_inv_08",
+    "case_tkt_inv_11b",
+    "case_tkt_exe_14",
+    "case_tkt_ctx_02"
+  ]
+}
