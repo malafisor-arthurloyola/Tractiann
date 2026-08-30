@@ -19,12 +19,6 @@ class AgentState(TypedDict):
     # --- Contexto coletado pela investigação ---
     # Envelopes brutos, por categoria (category -> envelope {mode, notes, data})
     raw: dict[str, dict]
-    # Recursos específicos extraídos (para o nó de decisão usar)
-    baseline: dict | None
-    analyses: list[dict]
-    rms_data: dict | None
-    spectrum_data: dict | None
-    data_quality: dict | None
 
     # --- Resultado do quality check ---
     quality_verdict: Literal["ok", "partial", "incomplete", "unavailable"] | None
@@ -39,6 +33,9 @@ class AgentState(TypedDict):
     # --- Decisão do agente ---
     decision: Literal["orient", "act", "escalate"] | None
     decision_justification: str | None
+    # Ação específica a executar (quando decision == "act")
+    action_type: Literal["reprocess", "specialist", "retrain", "update_config"] | None
+    action_target: str | None  # analysis_id / model_id / asset_id, conforme action_type
 
     # --- Resposta final ---
     response: str | None

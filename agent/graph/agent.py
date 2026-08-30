@@ -15,23 +15,19 @@ def _core_count() -> int:
 def route_after_quality(state: AgentState) -> str:
     """Roteamento após quality check.
 
-    - ok / partial → decide (pode prosseguir, com os gaps registrados)
+    - ok / partial / unavailable → decide (O decide lida com unavailable)
     - incomplete + ainda há next_tool → investigate (busca a tool específica que falta)
-    - incomplete sem next_tool (já tentou backups) → decide (ciente das lacunas)
-    - unavailable → escala (não tem como prosseguir com segurança)
+    - incomplete sem next_tool → decide (ciente das lacunas)
     """
     verdict = state.get("quality_verdict", "ok")
 
-    if verdict == "unavailable":
-        return "escalate"
-
     if verdict == "incomplete" and state.get("next_tool"):
-        # Limita o número de idas ao investigate
         calls = state.get("tools_called") or []
         if len(calls) - _core_count() < MAX_RETRIES:
             return "investigate"
 
-    # ok, partial, incomplete-sem-backup → decide ciente das lacunas
+    # Todas as outras situações vão para decide
+    # (decide lida com unavailable → escalate internamente)
     return "decide"
 
 

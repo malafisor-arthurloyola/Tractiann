@@ -99,6 +99,12 @@ def log_execution(result: dict, agent_version: str = "v1"):
 def _rows(conn, query, params=()):
     cur = conn.cursor()
     cur.execute(query, params)
+    if cur.description is None:
+        # DML (INSERT/UPDATE/DELETE): sem result set → retorna linhas afetadas
+        affected = cur.rowcount
+        conn.commit()
+        cur.close()
+        return {"affected": affected}
     cols = [d[0] for d in cur.description]
     rows = [dict(zip(cols, r)) for r in cur.fetchall()]
     cur.close()
@@ -106,7 +112,11 @@ def _rows(conn, query, params=()):
 
 
 def query(query: str, params=()):
-    """Executa uma query arbitrária e retorna as linhas como dicts."""
+    """Executa uma query arbitrária e retorna as linhas como dicts.
+
+    - SELECT → lista de dicts
+    - DML (INSERT/UPDATE/DELETE) → dict com {'affected': N}
+    """
     conn = _get_connection()
     if not conn:
         return None
@@ -146,18 +156,20 @@ def compare_versions(v_a: str, v_b: str) -> list:
         lista de linhas com {decision, quality_verdict, v_a, v_b}
     """
     rows = query(
-        """SELECT
-            COALESCE(a.decision, b.decision) AS decision,
-            COALESCE(a.quality_verdict, b.quality_verdict) AS quality_verdict,
-            COALESCE(a.n, 0) AS v_a,
-            COALESCE(b.n, 0) AS v_b
-           FROM (SELECT decision, quality_verdict, COUNT(*) n FROM execucoes
-                 WHERE agent_version = %s GROUP BY decision, quality_verdict) a
-           FULL OUTER JOIN (SELECT decision, quality_verdict, COUNT(*) n FROM execucoes
-                 WHERE agent_version = %s GROUP BY decision, quality_verdict) b
-             ON a.decision = b.decision
-            AND a.quality_verdict = b.quality_verdict
-           ORDER BY v_a + v_b DESC""",
+        """SELECT * FROM (
+            SELECT
+                COALESCE(a.decision, b.decision) AS decision,
+                COALESCE(a.quality_verdict, b.quality_verdict) AS quality_verdict,
+                COALESCE(a.n, 0) AS v_a,
+                COALESCE(b.n, 0) AS v_b
+            FROM (SELECT decision, quality_verdict, COUNT(*) n FROM execucoes
+                  WHERE agent_version = %s GROUP BY decision, quality_verdict) a
+            FULL OUTER JOIN (SELECT decision, quality_verdict, COUNT(*) n FROM execucoes
+                  WHERE agent_version = %s GROUP BY decision, quality_verdict) b
+              ON a.decision = b.decision
+             AND a.quality_verdict = b.quality_verdict
+        ) t
+        ORDER BY v_a + v_b DESC""",
         (v_a, v_b),
     ) or []
     return rows

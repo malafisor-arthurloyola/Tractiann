@@ -1,0 +1,30 @@
+[project]
+name = "tractian-agent"
+version = "0.1.0"
+description = "Agente industrial de suporte — TRACTIAN x Inteli"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph==1.2.11",
+    "langchain-core>=1.6,<2",
+    "langchain-openai>=1.6,<2",
+    "openai>=3,<4",
+    "mcp==2.1.1",
+    "opentelemetry-api>=1.44",
+    "opentelemetry-sdk>=1.44",
+    "opentelemetry-exporter-otlp>=1.44",
+    "openinference-instrumentation-langchain>=0.1.70",
+    "psycopg2-binary>=2.9,<3",
+    "python-dotenv>=1.0",
+    "httpx>=0.28",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

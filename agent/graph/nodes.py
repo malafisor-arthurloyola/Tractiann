@@ -52,43 +52,41 @@ BACKUP_TOOLS = ["knowledge"]
 
 
 def investigate(state: AgentState) -> dict:
-    """Nó de investigação: coleta dados da API via tools MCP.
+    """Nó de investigação: coleta dados da API via tools HTTP.
 
     - Na 1ª passada, busca as 5 tools principais.
-    - Se voltar do quality_check com `next_tool` (dado faltante), busca APENAS
-      essa tool específica — em vez de repetir as mesmas 5.
+    - Se voltar do quality_check com `next_tool`, busca APENAS essa tool.
+
+    Retorna APENAS os tools chamados NESTA passada (não a lista inteira),
+    pois `tools_called` usa Annotated[list, operator.add] que appenda.
     """
     asset_id = state["asset_id"]
     user_id = state["user_id"]
     raw = dict(state.get("raw") or {})
-    tools_called = list(state.get("tools_called") or [])
 
     if state.get("next_tool"):
-        # Retry: buscar só a tool que falta (ex: knowledge)
         tool = state["next_tool"]
-        if tool not in tools_called:
-            try:
-                key, envelope = _handle_request(tool, asset_id, user_id)
-                raw[key] = envelope
-                tools_called.append(tool)
-            except Exception as e:
-                raw[tool] = {"mode": "unavailable", "notes": f"erro ao buscar {tool}: {e}", "data": None}
-                tools_called.append(tool)
+        try:
+            key, envelope = _handle_request(tool, asset_id, user_id)
+            raw[key] = envelope
+        except Exception as e:
+            raw[tool] = {"mode": "unavailable", "notes": f"erro ao buscar {tool}: {e}", "data": None}
+        new_tools = [tool]
     else:
-        # Primeira passada: 5 tools principais
+        new_tools = []
         for tool in CORE_TOOLS:
             try:
                 key, envelope = _handle_request(tool, asset_id, user_id)
                 raw[key] = envelope
             except Exception as e:
                 raw[tool] = {"mode": "unavailable", "notes": f"erro ao buscar {tool}: {e}", "data": None}
-            tools_called.append(tool)
+            new_tools.append(tool)
 
     return {
         "raw": raw,
-        "tools_called": tools_called,
+        "tools_called": new_tools,
         "next_tool": None,
-        "trace": [{"node": "investigate", "tools_called": tools_called}],
+        "trace": [{"node": "investigate", "tools_called": new_tools}],
     }
 
 
@@ -166,6 +164,52 @@ def quality_check(state: AgentState) -> dict:
     }
 
 
+def _extract_first_analysis_id(raw: dict) -> str | None:
+    """Pega o primeiro analysis_id disponível nas análises coletadas."""
+    analyses = _extract_analyses_list(raw.get("analyses", {}))
+    for a in analyses:
+        if isinstance(a, dict) and a.get("id"):
+            return a["id"]
+    return None
+
+
+def _extract_action(decision_text: str, state: AgentState) -> tuple[str, str]:
+    """Determina (action_type, action_target) a partir do texto do LLM + dados.
+
+    O LLM decide "AGIR", mas precisamos saber QUAL ação e EM QUAL alvo. Mapeamos
+    por palavras-chave no texto e pelo alvo disponível (primeira análise, modelo,
+    ou o próprio ativo).
+    """
+    asset_id = state.get("asset_id") or ""
+    text = (decision_text or "").lower()
+    raw = state.get("raw") or {}
+
+    # Prioridade de palavras-chave (regras do gabarito)
+    if "retrein" in text or "retrain" in text:
+        model_id = _find_model_id(raw)
+        return "retrain", model_id or "mdl_vib_v3"
+    if "config" in text or "criticidade" in text or "critical" in text:
+        return "update_config", asset_id
+    if "especialista" in text or "specialist" in text:
+        aid = _extract_first_analysis_id(raw)
+        return "specialist", aid or ""
+    if "reprocess" in text or "reprocessar" in text:
+        aid = _extract_first_analysis_id(raw)
+        return "reprocess", aid or ""
+    # Fallback
+    return "reprocess", _extract_first_analysis_id(raw) or ""
+
+
+def _find_model_id(raw: dict) -> str | None:
+    """Procura um model_id real (field `id`) num envelope de models, se houver."""
+    models_env = raw.get("models")
+    if isinstance(models_env, dict):
+        data = models_env.get("data") or {}
+        if isinstance(data, dict) and data.get("id"):
+            return data["id"]
+    return None
+
+
 def decide(state: AgentState) -> dict:
     """Nó de decisão: usa o LLM para decidir entre orientar, agir ou escalar.
     
@@ -215,11 +259,18 @@ def decide(state: AgentState) -> dict:
     # em re-execuções de dev/avaliação). Chave = hash do prompt.
     cached = _cached_decision(context_text)
     if cached is not None:
+        decision = cached[0]
+        if decision == "act":
+            action_type, action_target = _extract_action(cached[1], state)
+        else:
+            action_type, action_target = None, None
         return {
-            "decision": cached[0],
+            "decision": decision,
             "decision_justification": cached[1],
             "response": cached[1],
-            "trace": [{"node": "decide", "decision": cached[0], "from_cache": True}],
+            "action_type": action_type,
+            "action_target": action_target,
+            "trace": [{"node": "decide", "decision": decision, "from_cache": True}],
         }
 
     llm = _get_llm()
@@ -238,11 +289,18 @@ def decide(state: AgentState) -> dict:
 
     _write_decision_cache(context_text, decision, response.content)
 
+    if decision == "act":
+        action_type, action_target = _extract_action(response.content, state)
+    else:
+        action_type, action_target = None, None
+
     return {
         "decision": decision,
         "decision_justification": response.content,
         "response": response.content,
-        "trace": [{"node": "decide", "decision": decision}],
+        "action_type": action_type,
+        "action_target": action_target,
+        "trace": [{"node": "decide", "decision": decision, "action": action_type}],
     }
 
 
@@ -252,8 +310,11 @@ _CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".run" / "llm_cache
 
 
 def _cache_key(context_text: str) -> str:
+    """Chave = hash(versão + contexto). Mudar AGENT_VERSION invalida o cache."""
     import hashlib
-    return hashlib.sha1(context_text.encode("utf-8")).hexdigest()
+    from ..version import AGENT_VERSION
+    payload = f"{AGENT_VERSION}:{context_text}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
 def _cached_decision(context_text: str):
@@ -290,38 +351,79 @@ def respond(state: AgentState) -> dict:
     }
 
 
+def _build_action_url(action_type: str, target: str) -> tuple[str, str]:
+    """Mapeia action_type + target para (method, path) da API."""
+    if action_type == "reprocess":
+        return "POST", f"/analyses/{target}/reprocess"
+    if action_type == "specialist":
+        return "POST", f"/analyses/{target}/request-specialist"
+    if action_type == "retrain":
+        return "POST", f"/models/{target}/request-retraining"
+    if action_type == "update_config":
+        return "PATCH", f"/assets/{target}"
+    return "POST", f"/cases/{target}/escalate"
+
+
 def act(state: AgentState) -> dict:
-    """Nó de ação: pausa para confirmação humana antes de executar."""
+    """Nó de ação: pausa para HITL, depois executa POST/PATCH real na API."""
     decision = state.get("decision") or ""
     justification = state.get("decision_justification") or ""
-    
-    # Antes de executar qualquer ação de impacto, pede confirmação humana
+    action_type = state.get("action_type")
+    action_target = state.get("action_target")
+    user_id = state.get("user_id") or ""
+    case_id = state.get("case_id") or ""
+
+    # 1. Pede confirmação humana antes de qualquer mutação
     confirmed = interrupt({
         "type": "action_confirmation",
         "decision": decision,
+        "action_type": action_type,
+        "action_target": action_target,
         "justification": justification[:500],
         "asset_id": state.get("asset_id"),
         "ticket_id": state.get("ticket_id"),
         "gaps": state.get("data_gaps") or {},
     })
-    
+
     if not confirmed:
-        # Humano cancelou → escala em vez de agir
         return {
             "decision": "escalate",
             "decision_justification": (
-                f"Ação '{decision}' cancelada pelo humano. "
+                f"Ação '{action_type}' no '{action_target}' cancelada pelo humano. "
                 f"Justificativa original: {justification[:200]}"
             ),
             "trace": [{"node": "act", "action": "cancelled_by_human",
-                       "original_decision": decision}],
+                       "action_type": action_type, "action_target": action_target}],
         }
-    
-    # Humano confirmou → registra que a ação foi executada
+
+    # 2. Executa a ação real na API
+    if not action_type or not action_target:
+        return {
+            "trace": [{"node": "act", "action": "skipped",
+                       "reason": "action_type ou action_target ausente"}],
+        }
+
+    # Para escalate, usa case_id; para as demais, o action_target
+    effective_target = case_id if action_type == "escalate" else action_target
+    method, path = _build_action_url(action_type, effective_target)
+
+    try:
+        result = tractian_request(
+            method=method,
+            path=path,
+            user_id=user_id,
+            json_data={"justification": justification},
+        )
+        action_id = result.get("action_id", "?")
+        message = result.get("message", "")
+    except Exception as e:
+        action_id = None
+        message = f"ERRO {e}"
+
     return {
-        "trace": [{"node": "act", "action": decision,
-                   "justification": justification[:120],
-                   "confirmed_by": "human"}],
+        "trace": [{"node": "act", "action": decision, "action_type": action_type,
+                   "action_target": action_target, "api_result": message,
+                   "action_id": action_id, "confirmed_by": "human"}],
     }
 
 

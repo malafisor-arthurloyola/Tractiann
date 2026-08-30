@@ -27,19 +27,6 @@ def _is_enabled() -> bool:
     return os.getenv("PHOENIX_ENABLED", "0") == "1"
 
 
-def is_within_trace() -> bool:
-    """True se já estamos dentro de um trace ativo (exceto o nó raiz)."""
-    try:
-        from opentelemetry import trace
-        span = trace.get_current_span()
-        if span is None or span.get_span_context().trace_id == 0:
-            return False
-        # Se há um span ativo, estamos dentro de um trace
-        return span.get_span_context().trace_id != 0
-    except Exception:
-        return False
-
-
 def setup_phoenix_tracing(force: bool = False) -> bool:
     """Configura o tracing OpenTelemetry apontando para o Phoenix.
 
