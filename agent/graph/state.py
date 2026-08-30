@@ -19,12 +19,6 @@ class AgentState(TypedDict):
     # --- Contexto coletado pela investigação ---
     # Envelopes brutos, por categoria (category -> envelope {mode, notes, data})
     raw: dict[str, dict]
-    # Recursos específicos extraídos (para o nó de decisão usar)
-    baseline: dict | None
-    analyses: list[dict]
-    rms_data: dict | None
-    spectrum_data: dict | None
-    data_quality: dict | None
 
     # --- Resultado do quality check ---
     quality_verdict: Literal["ok", "partial", "incomplete", "unavailable"] | None

@@ -52,43 +52,41 @@ BACKUP_TOOLS = ["knowledge"]
 
 
 def investigate(state: AgentState) -> dict:
-    """Nó de investigação: coleta dados da API via tools MCP.
+    """Nó de investigação: coleta dados da API via tools HTTP.
 
     - Na 1ª passada, busca as 5 tools principais.
-    - Se voltar do quality_check com `next_tool` (dado faltante), busca APENAS
-      essa tool específica — em vez de repetir as mesmas 5.
+    - Se voltar do quality_check com `next_tool`, busca APENAS essa tool.
+
+    Retorna APENAS os tools chamados NESTA passada (não a lista inteira),
+    pois `tools_called` usa Annotated[list, operator.add] que appenda.
     """
     asset_id = state["asset_id"]
     user_id = state["user_id"]
     raw = dict(state.get("raw") or {})
-    tools_called = list(state.get("tools_called") or [])
 
     if state.get("next_tool"):
-        # Retry: buscar só a tool que falta (ex: knowledge)
         tool = state["next_tool"]
-        if tool not in tools_called:
-            try:
-                key, envelope = _handle_request(tool, asset_id, user_id)
-                raw[key] = envelope
-                tools_called.append(tool)
-            except Exception as e:
-                raw[tool] = {"mode": "unavailable", "notes": f"erro ao buscar {tool}: {e}", "data": None}
-                tools_called.append(tool)
+        try:
+            key, envelope = _handle_request(tool, asset_id, user_id)
+            raw[key] = envelope
+        except Exception as e:
+            raw[tool] = {"mode": "unavailable", "notes": f"erro ao buscar {tool}: {e}", "data": None}
+        new_tools = [tool]
     else:
-        # Primeira passada: 5 tools principais
+        new_tools = []
         for tool in CORE_TOOLS:
             try:
                 key, envelope = _handle_request(tool, asset_id, user_id)
                 raw[key] = envelope
             except Exception as e:
                 raw[tool] = {"mode": "unavailable", "notes": f"erro ao buscar {tool}: {e}", "data": None}
-            tools_called.append(tool)
+            new_tools.append(tool)
 
     return {
         "raw": raw,
-        "tools_called": tools_called,
+        "tools_called": new_tools,
         "next_tool": None,
-        "trace": [{"node": "investigate", "tools_called": tools_called}],
+        "trace": [{"node": "investigate", "tools_called": new_tools}],
     }
 
 
@@ -252,8 +250,11 @@ _CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".run" / "llm_cache
 
 
 def _cache_key(context_text: str) -> str:
+    """Chave = hash(versão + contexto). Mudar AGENT_VERSION invalida o cache."""
     import hashlib
-    return hashlib.sha1(context_text.encode("utf-8")).hexdigest()
+    from ..version import AGENT_VERSION
+    payload = f"{AGENT_VERSION}:{context_text}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
 def _cached_decision(context_text: str):

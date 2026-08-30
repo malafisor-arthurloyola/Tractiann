@@ -34,14 +34,32 @@ def _expected_api_categories(expected: dict) -> set:
         elif "/rms" in step: cats.add("rms")
         elif "/spectrum" in step: cats.add("spectrum")
         elif "/data-quality" in step: cats.add("data_quality")
+        elif "/knowledge" in step: cats.add("knowledge")
+        elif "/models" in step: cats.add("models")
+        elif "/assets" in step: cats.add("asset_info")
     return cats
+
+
+def _expected_actions(expected: dict) -> set:
+    """Extrai ações POST/PATCH esperadas do gabarito."""
+    actions = set()
+    for item in expected.get("expected_path", []):
+        step = item.get("step", "")
+        if step.startswith("POST") or step.startswith("PATCH"):
+            if "/escalate" in step: actions.add("escalate")
+            elif "/reprocess" in step: actions.add("reprocess")
+            elif "/retrain" in step: actions.add("retrain")
+            elif "/specialist" in step: actions.add("specialist")
+            elif "/config" in step: actions.add("update_config")
+            else: actions.add("unknown_action")
+    return actions
 
 
 def assert_trajectory(result: dict, expected: dict) -> dict:
     """Compara a trajetória real com a esperada.
     
     Args:
-        result: estado final do grafo (com trace, decision, quality_verdict)
+        result: estado final do grafo (com trace, decision, quality_verdict, data_gaps)
         expected: entrada do gabarito (com expected_path, mode)
     
     Returns:
@@ -61,25 +79,23 @@ def assert_trajectory(result: dict, expected: dict) -> dict:
         else:
             details.append(f"decisao: FALHOU (esperado={exp_decision}, real={real_decision})")
     elif exp_decision:
-        details.append(f"decisao: sem resultado do agente")
+        details.append("decisao: FALHOU (agente não retornou decisão)")
     else:
         details.append("decisao: sem gabarito")
 
-    # 2. Chamadas à API (tools chamadas na investigação)
-    exp_categories = _expected_api_categories(expected)
+    # 2. Chamadas à API (tools de investigação)
+    exp_cats = _expected_api_categories(expected)
     real_tools = []
     for step in result.get("trace", []):
         if isinstance(step, dict) and step.get("node") == "investigate":
             real_tools = step.get("tools_called", [])
             break
     real_set = set(real_tools)
-
-    if exp_categories:
-        if exp_categories:
-            covered = exp_categories & real_set
-            coverage = len(covered) / len(exp_categories)
-            score += coverage
-            details.append(f"tools: {coverage:.0%} cobertura ({len(covered)}/{len(exp_categories)})")
+    if exp_cats:
+        covered = exp_cats & real_set
+        coverage = len(covered) / len(exp_cats) if exp_cats else 0
+        score += coverage
+        details.append(f"tools: {coverage:.0%} cobertura ({len(covered)}/{len(exp_cats)})")
     else:
         details.append("tools: sem gabarito de chamadas")
 
@@ -93,9 +109,8 @@ def assert_trajectory(result: dict, expected: dict) -> dict:
 
     # 4. Gaps registrados (honestidade)
     gaps = result.get("data_gaps") or {}
-    # Deve registrar gaps honestamente quando o verdict não é ok
     verdict = result.get("quality_verdict")
-    if verdict != "ok" and not gaps:
+    if verdict and verdict != "ok" and not gaps:
         details.append("gaps: FALHOU — verdict não-ok mas nenhum gap registrado")
     elif gaps:
         score += 1.0

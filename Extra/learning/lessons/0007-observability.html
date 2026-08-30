@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>L7 — Observabilidade: Postgres, LangSmith e Phoenix</title>
+  <title>L7 — Observabilidade: Postgres e Phoenix</title>
   <link rel="stylesheet" href="../assets/lesson.css">
 </head>
 <body>
@@ -14,13 +14,17 @@
     <a href="0008-streamlit.html">L8</a>
   </header>
 
-  <h1>L7 — Observabilidade: Postgres, LangSmith e Phoenix</h1>
+  <h1>L7 — Observabilidade: Postgres e Phoenix</h1>
 
   <p>O agente está rodando. Mas como você sabe <strong>o que ele fez</strong>,
   <strong>por que decidiu aquilo</strong>, e <strong>se uma nova versão melhorou</strong>?
   É aí que entra a observabilidade.</p>
 
-  <h2>Três ferramentas, três níveis</h2>
+  <p class="note">Sobre a escolha: a <strong>LangSmith</strong> (da LangChain) faz esse
+  papel, mas é <strong>paga</strong>. Usamos o <strong>Phoenix (Arize)</strong>, que é o
+  equivalente <strong>gratuito e open source</strong> — mesmo padrão OpenTelemetry.</p>
+
+  <h2>Duas ferramentas, dois níveis</h2>
 
   <table>
     <tr>
@@ -32,22 +36,26 @@
     <tr>
       <td><span class="badge blue">Postgres</span></td>
       <td>Log de execuções</td>
-      <td>Ticket, versão do agente, trace JSON, decisão, timestamp</td>
+      <td>Ticket, agente_version, decisão, gaps, trace, timestamp</td>
       <td>Comparar versões, métricas agregadas, auditoria</td>
     </tr>
     <tr>
-      <td><span class="badge blue">LangSmith</span></td>
-      <td>Trace por chamada</td>
-      <td>Cada chamada ao LLM com input/output, latência, custo, tokens</td>
-      <td>Debugar por que o LLM respondeu X, debugar latência</td>
-    </tr>
-    <tr>
       <td><span class="badge blue">Phoenix</span></td>
-      <td>Análise visual</td>
-      <td>Dashboard com traces, distribuições, comparações lado-a-lado</td>
-      <td>Análise exploratória, apresentação, comparação visual</td>
+      <td>Trace detalhado + dashboard</td>
+      <td>Cada chamada ao LLM (prompt/output/tokens/latência) em dashboard :6006</td>
+      <td>Debugar por que o LLM respondeu X, ver traces lado-a-lado</td>
     </tr>
   </table>
+
+  <h2>Comparando versões (a alma da observabilidade)</h2>
+  <p>Quando você muda o agente (prompt, política, prompt) você precisa de uma
+  <code>agent_version</code> nova. No nosso projeto, bump manual em
+  <code>agent/version.py</code>. Aí o Postgres deixa comparar:</p>
+  <pre><code># via Makefile
+make compare-versions     # lista versões e quantas execuções cada uma tem
+make compare v1 v2        # distribuição de decisões lado a lado (com % )</code></pre>
+  <p>O Phoenix complementa: abre o trace do mesmo ticket nas duas versões e vê,
+  visualmente, onde o comportamento mudou.</p>
 
   <h2>Postgres — o diário do agente</h2>
 

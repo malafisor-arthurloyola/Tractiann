@@ -6,6 +6,10 @@ from dotenv import load_dotenv
 load_dotenv(Path("agent/.env"))
 
 from agent.graph.agent import agent_graph
+from agent.logging.phoenix import setup_phoenix_tracing
+from langgraph.types import Command
+
+setup_phoenix_tracing()
 
 cases = json.loads(Path("agent-input/cases.json").read_text(encoding="utf-8"))
 lines = [f"Total de casos: {len(cases)}"]
@@ -18,14 +22,15 @@ for i, case in enumerate(cases[:12], 1):
         "ticket_id": case["ticket_id"], "case_id": case["id"],
         "company_id": case["company_id"], "user_id": case["user_id"],
         "asset_id": case["asset_id"], "message": case["message"],
-        "raw": {}, "baseline": None, "analyses": [], "rms_data": None,
-        "spectrum_data": None, "data_quality": None, "quality_verdict": None,
+        "raw": {}, "quality_verdict": None,
         "quality_notes": None, "data_gaps": {}, "next_tool": None,
         "tools_called": [], "decision": None, "decision_justification": None,
         "response": None, "trace": [],
     }
     try:
         r = agent_graph.invoke(st)
+        if "__interrupt__" in r:
+            r = agent_graph.invoke(Command(resume=True))
         q = r.get("quality_verdict") or "-"
         d = r.get("decision") or "-"
         gaps = list(r.get("data_gaps", {}).keys())
