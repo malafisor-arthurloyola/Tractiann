@@ -1,21 +1,36 @@
 from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolNode
 from .state import AgentState
 from .nodes import investigate, quality_check, decide, respond, act, escalate
+
+MAX_RETRIES = 3
+
+
+def _core_count() -> int:
+    """Quantidade de tools da investigação inicial (para calcular o limite de retry)."""
+    from .nodes import CORE_TOOLS
+    return len(CORE_TOOLS)
 
 
 def route_after_quality(state: AgentState) -> str:
     """Roteamento após quality check.
-    
-    - ok/partial → decide (pode prosseguir com dados parciais)
-    - incomplete → investiga mais (tenta buscar dados faltantes)
-    - unavailable → escala (não tem como prosseguir)
+
+    - ok / partial → decide (pode prosseguir, com os gaps registrados)
+    - incomplete + ainda há next_tool → investigate (busca a tool específica que falta)
+    - incomplete sem next_tool (já tentou backups) → decide (ciente das lacunas)
+    - unavailable → escala (não tem como prosseguir com segurança)
     """
     verdict = state.get("quality_verdict", "ok")
+
     if verdict == "unavailable":
         return "escalate"
-    if verdict == "incomplete":
-        return "investigate"  # Tenta buscar dados faltantes
+
+    if verdict == "incomplete" and state.get("next_tool"):
+        # Limita o número de idas ao investigate
+        calls = state.get("tools_called") or []
+        if len(calls) - _core_count() < MAX_RETRIES:
+            return "investigate"
+
+    # ok, partial, incomplete-sem-backup → decide ciente das lacunas
     return "decide"
 
 
@@ -31,27 +46,25 @@ def route_after_decide(state: AgentState) -> str:
 
 def build_graph() -> StateGraph:
     """Monta o grafo do agente industrial.
-    
+
     Fluxo:
     investigate → quality_check → decide → (respond | act | escalate)
                          ↓
-                    incomplete → investigate (loop)
-                    unavailable → escalate
+              incomplete + próxima tool → investigate (busca só a tool que falta)
+              incomplete sem back-ups    → decide (ciente das lacunas)
+              unavailable                → escalate
     """
     graph = StateGraph(AgentState)
-    
-    # Adiciona nós
+
     graph.add_node("investigate", investigate)
     graph.add_node("quality_check", quality_check)
     graph.add_node("decide", decide)
     graph.add_node("respond", respond)
     graph.add_node("act", act)
     graph.add_node("escalate", escalate)
-    
-    # Ponto de entrada
+
     graph.set_entry_point("investigate")
-    
-    # Arestas
+
     graph.add_edge("investigate", "quality_check")
     graph.add_conditional_edges(
         "quality_check",
@@ -71,12 +84,11 @@ def build_graph() -> StateGraph:
             "escalate": "escalate",
         },
     )
-    
-    # Nós finais
+
     graph.add_edge("respond", END)
     graph.add_edge("act", END)
     graph.add_edge("escalate", END)
-    
+
     return graph.compile()
 
 

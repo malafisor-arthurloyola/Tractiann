@@ -1,6 +1,5 @@
 from typing import TypedDict, Literal, Annotated
-from langgraph.graph import add_messages
-from langchain_core.messages import BaseMessage
+import operator
 
 
 class AgentState(TypedDict):
@@ -18,19 +17,24 @@ class AgentState(TypedDict):
     message: str  # Texto do cliente
 
     # --- Contexto coletado pela investigação ---
-    company_info: dict | None
-    asset_info: dict | None
+    # Envelopes brutos, por categoria (category -> envelope {mode, notes, data})
+    raw: dict[str, dict]
+    # Recursos específicos extraídos (para o nó de decisão usar)
     baseline: dict | None
     analyses: list[dict]
     rms_data: dict | None
     spectrum_data: dict | None
     data_quality: dict | None
-    model_info: dict | None
-    knowledge_docs: list[dict]
 
     # --- Resultado do quality check ---
     quality_verdict: Literal["ok", "partial", "incomplete", "unavailable"] | None
     quality_notes: str | None
+    # Registro honesto do que faltou: category -> lista de problemas (nunca some)
+    data_gaps: Annotated[dict[str, list[str]], operator.or_]
+    # Próxima tool a tentar (quando incomplete), p/ investigar buscar dado faltante
+    next_tool: str | None
+    # Tools já tentadas (não repetir)
+    tools_called: Annotated[list[str], operator.add]
 
     # --- Decisão do agente ---
     decision: Literal["orient", "act", "escalate"] | None
@@ -40,4 +44,4 @@ class AgentState(TypedDict):
     response: str | None
 
     # --- Trace da execução (para avaliação) ---
-    trace: Annotated[list[dict], add_messages]
+    trace: Annotated[list[dict], operator.add]

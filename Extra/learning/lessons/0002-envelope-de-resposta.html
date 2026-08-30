@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L2 — O Envelope de Resposta: o segredo que o agente precisa entender</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0001-architecture-risks.html">L1 — Riscos</a> ·
+    <strong>L2 — Envelope</strong> ·
+    <a href="0003-tractian-system-map.html">L3 — Sistema</a>
+  </header>
+  <h1>L2 — O Envelope de Resposta</h1>
+
+  <p class="sub">Toda vez que o agente pergunta algo à API, ele não recebe só "os dados".
+  Ele recebe <strong>um pacote (envelope) com três campos</strong>. Entender como esse pacote
+  funciona é a diferença entre o agente <em>confiar</em> em dados errados e saber
+  quando <em>parar</em>.</p>
+
+  <h2>O formato do envelope</h2>
+  <div class="card">
+    <pre><code>{
+  "mode": "complete" | "partial" | "inconclusive" | "conflict" | "unavailable",
+  "notes": "mensagem explicativa ou null",
+  "data": { ... }
+}</code></pre>
+  </div>
+  <p>Os três campos:</p>
+  <ul>
+    <li><strong><code>mode</code></strong> — diz <em>qualidade</em> da resposta (não só o conteúdo).</li>
+    <li><strong><code>notes</code></strong> — explicação humana do que aconteceu.</li>
+    <li><strong><code>data</code></strong> — o dado em si (pode estar incompleto, vazio, ou com flag <code>"conflict": true</code>).</li>
+  </ul>
+
+  <h2>Os 5 modos — o que cada um significa na prática</h2>
+
+  <table>
+    <tr>
+      <th>Modo</th>
+      <th>O que chega no <code>data</code></th>
+      <th>O que o agente deve fazer</th>
+      <th>Probabilidade*</th>
+    </tr>
+    <tr>
+      <td><span class="badge green">complete</span></td>
+      <td>Dados inteiros, sem campo faltando</td>
+      <td>Confia e segue</td>
+      <td>~60%</td>
+    </tr>
+    <tr>
+      <td><span class="badge warn">partial</span></td>
+      <td>Dados com <em>campos removidos</em> (ex: <code>evidence</code> sumiu da análise)</td>
+      <td>Usa o que tem, anota o que falta. Pode prosseguir.</td>
+      <td>~15%</td>
+    </tr>
+    <tr>
+      <td><span class="badge red">inconclusive</span></td>
+      <td>Só o <code>asset_id</code> + flag <code>"inconclusive": true</code></td>
+      <td>Não tem dado. Tenta outra tool ou escala.</td>
+      <td>~10%</td>
+    </tr>
+    <tr>
+      <td><span class="badge red">conflict</span></td>
+      <td>Dados originais + flag <code>"conflict": true</code></td>
+      <td>Duas fontes discordam. Pesa evidência e decide com cautela.</td>
+      <td>~8%</td>
+    </tr>
+    <tr>
+      <td><span class="badge red">unavailable</span></td>
+      <td><code>{}</code> (dicionário vazio)</td>
+      <td>Dado indisponível. Escala ou busca dado alternativo.</td>
+      <td>~7%</td>
+    </tr>
+  </table>
+  <p class="small">*Distribuição padrão definida em <code>api/app/prob.py</code>. Com
+  <code>?seed=complete</code> na URL, força sempre <em>complete</em> (útil para explorar
+  no Swagger durante o desenvolvimento).</p>
+
+  <h2>Como o modo é decidido pela API</h2>
+  <ol class="steps">
+    <li><strong>Override de cenário?</strong> Ativos como G501 ou S420 têm comportamento
+        fixo definido em <code>seed.json</code> — sempre vêm com modo específico.</li>
+    <li><strong>Seed especial?</strong> <code>?seed=complete</code> força <em>complete</em>;
+        <code>?seed=degraded</code> força <em>partial</em>.</li>
+    <li><strong>Seed comum ou sem seed?</strong> O API calcula um hash determinístico
+        (<code>SHA-256(seed|resource|category)</code>) e compara com a distribuição
+        de probabilidades.</li>
+  </ol>
+
+  <div class="tip">
+    <strong>Por que isso é assim?</strong> Porque no mundo real, dados de sensores industriais
+    <em>nem sempre chegam completos</em>. Às vezes o sensor tá off, o dado tá conflitante,
+    ou tá atualizando. A API simula isso de propósito para treinar o agente a
+    <strong>lidar com incerteza</strong> — que é o grande diferencial de um bom agente.
+  </div>
+
+  <h2>O que cada categoria "perde" no modo partial</h2>
+  <div class="card">
+    <pre><code># Quais campos são removidos em cada categoria quando mode = partial
+_PARTIAL_DROP = {
+  "analyses":    ["evidence", "limitations"],  # sem evidência textual
+  "baseline":    ["features"],                 # sem lista de features
+  "data_quality": ["freshness_minutes"],       # sem信息 de frescor
+  "rms":         ["samples"],                  # sem amostras brutas
+  "model":       ["requirements", "last_run_at"],  # sem requisitos
+}</code></pre>
+  </div>
+
+  <h2>Teste seu entendimento</h2>
+
+  <div class="qa">
+    <div class="q">Pergunta 1</div>
+    <div class="a">O agente consulta o baseline do ativo G501 e recebe:
+    <code>{"mode": "unavailable", "data": {}, "notes": "Indisponibilidade temporária..."}</code>.
+    Ele deve:</div>
+    <details><summary>Resposta</summary>
+    <p>Reconhecer que o dado está <strong>indisponível</strong>. Não confiar em dado vazio.
+    Tentar outro dado (ex: RMS ou análise) ou <strong>escalar</strong> se não tiver outra fonte.
+    Nunca inventar um baseline "porque sim".</p></details>
+  </div>
+
+  <div class="qa">
+    <div class="q">Pergunta 2</div>
+    <div class="a">Qual a diferença prática entre <code>inconclusive</code> e
+    <code>unavailable</code>?</div>
+    <details><summary>Resposta</summary>
+    <p><strong>Inconclusive</strong>: o recurso existe, a API tentou processar, mas os dados
+    não sustentam uma conclusão. Só vem o ID. <strong>Unavailable</strong>: a fonte
+    retornou nada (dicionário vazio). Na prática, o agente escala nos dois casos,
+    mas o <em>notes</em> diz o porquê.</p></details>
+  </div>
+
+  <div class="qa">
+    <div class="q">Pergunta 3</div>
+    <div class="a">Se <code>seed=complete</code> garante respostas completas, por que não
+    usamos sempre?</div>
+    <details><summary>Resposta</summary>
+    <p>Porque na <strong>avaliação</strong> (e no mundo real), o agente precisa provar que
+    sabe lidar com dados incompletos. O modo <em>complete</em> é só para <em>explorar</em>
+    a API no Swagger durante o desenvolvimento.</p></details>
+  </div>
+
+  <p><strong>Tem dúvidas?</strong> Pergunte ao agente — ele é seu professor e pode explicar qualquer ponto deste texto.</p>
+
+  <p class="small"><em>Fonte primária:
+  <a href="https://fastapi.tiangolo.com/">FastAPI Documentation</a> ·
+  Código: <code>api/app/prob.py</code> (resolve_mode + envelope)
+  </em></p>
+</body>
+</html>

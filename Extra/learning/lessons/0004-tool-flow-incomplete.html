@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L4 — Fluxo das Tools: de incomplete a outra tool</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0001-architecture-risks.html">L1</a> ·
+    <a href="0002-envelope-de-resposta.html">L2</a> ·
+    <a href="0003-tractian-system-map.html">L3</a> ·
+    <strong>L4 — Fluxo das Tools</strong>
+  </header>
+
+  <h1>L4 — Fluxo das Tools: incomplete, check e outra tool</h1>
+
+  <p>Sua pergunta foi: "como assim acessar outras tools? o incomplete é pra cada requisição
+  específica? onde fica o check?" Vou responder com um exemplo real, mostrando o código.</p>
+
+  <h2>A resposta curta</h2>
+  <div class="card">
+    <p>O <strong>quality check</strong> verifica o <strong>mode do envelope</strong> de cada
+    requisição que o agente fez. Se um dado veio <code>partial</code> ou
+    <code>unavailable</code>, ele pode mandar o agente buscar os dados que faltaram em
+    <strong>outra tool sobre o mesmo ativo</strong> — porque o ativo tem vários tipos de
+    dados (baseline, RMS, espectro, qualidade).</p>
+  </div>
+
+  <h2>Exemplo concreto: ticket TKT-INV-05</h2>
+  <div class="card">
+    <p><em>"Tô vendo o RMS do compressor subindo há duas semanas, mas não recebi insight
+    nenhum. Cadê o diagnóstico?"</em></p>
+    <p class="small">Ativo: <code>asset_C710</code> · Usuário: <code>usr_sofia</code></p>
+  </div>
+
+  <h3>Passo 1 — investigate chama 5 tools em sequência</h3>
+
+  <p>O nó <code>investigate</code> não chama uma tool só. Ele faz <strong>5 requisições
+  diferentes</strong> sobre o mesmo ativo:</p>
+
+  <table>
+    <tr><th>#</th><th>Tool</th><th>O que busca</th></tr>
+    <tr><td>1</td><td><code>GET /assets/asset_C710/baseline</code></td><td>O "normal" aprendido</td></tr>
+    <tr><td>2</td><td><code>GET /assets/asset_C710/analyses</code></td><td>Diagnósticos automáticos</td></tr>
+    <tr><td>3</td><td><code>GET /assets/asset_C710/rms</code></td><td>Série de vibração</td></tr>
+    <tr><td>4</td><td><code>GET /assets/asset_C710/spectrum</code></td><td>FFT (frequências)</td></tr>
+    <tr><td>5</td><td><code>GET /assets/asset_C710/data-quality</code></td><td>Completude dos dados</td></tr>
+  </table>
+
+  <p>Cada requisição retorna um <strong>envelope próprio</strong> com seu <code>mode</code>.</p>
+
+  <h3>Passo 2 — cada tool retorna seu envelope</h3>
+
+  <div class="card">
+    <pre><code>Tool 1 (baseline):  {"mode": "partial",  "data": {"state": "established"}, "notes": "Informação parcial..."}
+Tool 2 (analyses):  {"mode": "complete", "data": {"analyses": [...]}}
+Tool 3 (rms):       {"mode": "complete", "data": {"series": [...], "alarm_threshold": 4.2}}
+Tool 4 (spectrum):  {"mode": "unavailable", "data": {}, "notes": "Indisponibilidade temporária..."}
+Tool 5 (data_quality): {"mode": "partial", "data": {"completeness": 0.85}}</code></pre>
+  </div>
+
+  <p>Note que o <strong>spectrum veio unavailable</strong> e o <strong>baseline veio
+  partial</strong>. As outras estão ok.</p>
+
+  <h3>Passo 3 — quality_check avalia TUDO junto</h3>
+
+  <p>O <code>quality_check</code> olha os envelopes que chegaram e decide:</p>
+
+  <ul>
+    <li>Baseline = <code>partial</code> → dados parciais, mas tem algo.</li>
+    <li>Análises = <code>complete</code> → ok.</li>
+    <li>RMS = <code>complete</code> → ok.</li>
+    <li>Spectrum = <code>unavailable</code> → <strong>sem espectro</strong>.</li>
+    <li>Data quality = <code>partial</code> → completude 85%, aceitável.</li>
+  </ul>
+
+  <p>O <code>quality_check</code> retorna: <strong>"ok com ressalvas"</strong> — tem dados
+  suficientes pra decidir, mas o espectro faltou. O agente pode:</p>
+  <ol>
+    <li><strong>Seguir com o que tem</strong> (baseline parcial + análises completas + RMS
+        completo) — Decide com base nisso.</li>
+    <li><strong>Tentar spectrum de novo</strong> — Mas se veio <code>unavailable</code>,
+        provavelmente vai vir de novo.</li>
+    <li><strong>Escalar</strong> — Se o espectro for essencial pro diagnóstico.</li>
+  </ol>
+
+  <h2>Os 3 cenários do quality_check</h2>
+
+  <table>
+    <tr>
+      <th>Cenário</th>
+      <th>O que o quality_check vê</th>
+      <th>Veredicto</th>
+      <th>O que acontece no grafo</th>
+    </tr>
+    <tr>
+      <td><span class="badge green">ok</span></td>
+      <td>Todas as tools retornaram <code>complete</code></td>
+      <td><code>ok</code></td>
+      <td>Segues pro <code>decide</code></td>
+    </tr>
+    <tr>
+      <td><span class="badge warn">partial</span></td>
+      <td>Algumas tools vieram <code>partial</code> (campos faltando)</td>
+      <td><code>partial</code></td>
+      <td>Segues pro <code>decide</code> — o LLM sabe que faltam detalhes</td>
+    </tr>
+    <tr>
+      <td><span class="badge red">incomplete</span></td>
+      <td>Dados muito incompletos (ex: analyses vazio)</td>
+      <td><code>incomplete</code></td>
+      <td>Volta pro <code>investigate</code> pra tentar de novo</td>
+    </tr>
+    <tr>
+      <td><span class="badge red">unavailable</span></td>
+      <td>Baseline <code>unavailable</code> ou <code>conflict</code></td>
+      <td><code>unavailable</code></td>
+      <td>Vai direto pra <code>escalate</code></td>
+    </tr>
+  </table>
+
+  <h2>Onde fica o check no código</h2>
+
+  <div class="card">
+    <pre><code># agent/graph/nodes.py — função quality_check()
+
+def quality_check(state):
+    baseline = state.get("baseline")          # Envelope da tool 1
+    analyses = state.get("analyses", [])      # Resposta da tool 2
+
+    # Verifica o MODE do envelope do baseline
+    if baseline and baseline.get("mode") in ("unavailable", "conflict"):
+        return {"quality_verdict": "unavailable"}  # → escalate
+
+    if baseline.get("mode") == "partial":
+        return {"quality_verdict": "partial"}      # → decide (com ressalva)
+
+    # Verifica se tem análises
+    if not analyses:
+        return {"quality_verdict": "incomplete"}   # → volta pra investigate
+
+    return {"quality_verdict": "ok"}               # → decide</code></pre>
+  </div>
+
+  <h2>"Outra tool" significa o quê exatamente?</h2>
+
+  <p>Quando o grafo volta pra <code>investigate</code>, o agente não repete as mesmas 5
+  tools automaticamente. Ele pode:</p>
+
+  <ul>
+    <li><strong>Tentar uma tool diferente</strong> que não foi chamada antes (ex:
+        <code>searchKnowledge(q="procedimento manutenção compressor")</code> pra buscar
+        procedimento de manutenção que ele não tinha consultado).</li>
+    <li><strong>Tentar a mesma tool com parâmetros diferentes</strong> (ex: mudar o
+        <code>seed</code> pra forçar resposta completa).</li>
+    <li><strong>Buscar conhecimento</strong> via <code>searchKnowledge</code> se o
+        diagnóstico automático falhou.</li>
+  </ul>
+
+  <p>Na prática, o nosso <code>investigate</code> atual é <strong>simplificado</strong> —
+  ele sempre chama as mesmas 5 tools. A arquitetura real (que vamos implementar quando o
+  LLM estiver integrado ao grafo) deixa o agente <strong>escolher</strong> quais tools
+  chamar com base no que já tem.</p>
+
+  <h2>Teste seu entendimento</h2>
+
+  <div class="qa">
+    <div class="q">Pergunta 1</div>
+    <div class="a">Se o baseline veio <code>partial</code> e o spectrum veio
+    <code>unavailable</code>, qual é o veredicto do quality_check?</div>
+    <details><summary>Resposta</summary>
+    <p><code>partial</code>. O baseline parcial é aceito (o agente segue pro
+    <code>decide</code> com ressalva). O spectrum unavailable é anotado mas não impede
+    a decisão — o agente pode decidir sem o espectro.</p></details>
+  </div>
+
+  <div class="qa">
+    <div class="q">Pergunta 2</div>
+    <div class="a">O quality_check verifica o envelope de cada tool individualmente, ou
+    verifica tudo de uma vez?</div>
+    <details><summary>Resposta</summary>
+    <p>Ele recebe o estado com <strong>todos os envelopes</strong> e verifica os que
+    são críticos (baseline e analyses). No código atual, ele checa o baseline primeiro
+    e depois se tem análises. Não verifica todas as 5 tools — é uma verificação
+    seletiva.</p></details>
+  </div>
+
+  <div class="qa">
+    <div class="q">Pergunta 3</div>
+    <div class="a">Quando o grafo volta pra <code>investigate</code>, ele sempre repete
+    as mesmas tools?</div>
+    <details><summary>Resposta</summary>
+    <p>No código atual, sim (é simplificado). Na arquitetura ideal, o LLM decide
+    quais tools chamar com base no que já tem — pode buscar uma tool diferente
+    (ex: <code>searchKnowledge</code>) ou tentar a mesma com parâmetros
+    diferentes.</p></details>
+  </div>
+
+  <p><strong>Tem dúvidas?</strong> Pergunte ao agente — ele é seu professor e pode
+  explicar qualquer ponto deste texto.</p>
+
+  <p class="small"><em>Fontes primárias:
+  <code>agent/graph/nodes.py</code> (quality_check + investigate) ·
+  <code>agent/graph/agent.py</code> (roteamento condicional) ·
+  <code>CONTEXT.md</code> (glossário)</em></p>
+</body>
+</html>

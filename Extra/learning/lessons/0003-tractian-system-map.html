@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L3 — Mapa do Sistema Tractian</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0001-architecture-risks.html">L1</a> ·
+    <a href="0002-envelope-de-resposta.html">L2</a> ·
+    <strong>L3 — Sistema</strong>
+  </header>
+
+  <h1>L3 — Mapa do Sistema Tractian</h1>
+
+  <p>A API industrial tem <strong>7 blocos</strong>. O agente navega por eles como um
+  engenheiro de suporte visitando setores diferentes da fábrica. Cada bloco responde uma
+  pergunta diferente sobre o ativo do cliente.</p>
+
+  <h2>Os 7 blocos</h2>
+
+  <table>
+    <tr>
+      <th>#</th>
+      <th>Bloco</th>
+      <th>Pergunta que responde</th>
+      <th>Endpoints</th>
+    </tr>
+    <tr>
+      <td>1</td>
+      <td><span class="badge blue">Contexto</span></td>
+      <td><em>Quem é o cliente? Quais ativos tem?</em></td>
+      <td><code>GET /companies/{id}</code>, <code>GET /companies/{id}/assets</code>, <code>GET /users/me</code></td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td><span class="badge blue">Ativos</span></td>
+      <td><em>O que é essa máquina? Qual sua config?</em></td>
+      <td><code>GET /assets/{id}</code>, <code>GET /assets/{id}/analyses</code>, <code>PATCH /assets/{id}</code> ⚠️</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td><span class="badge blue">Análises</span></td>
+      <td><em>O modelo detectou algo? Qual a evidência?</em></td>
+      <td><code>GET /analyses/{id}</code>, <code>POST /analyses/{id}/reprocess</code> ⚠️, <code>POST /analyses/{id}/request-specialist</code> ⚠️</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td><span class="badge blue">Dados Técnicos</span></td>
+      <td><em>Como estão os sensores? Qual o espectro?</em></td>
+      <td><code>GET /assets/{id}/baseline</code>, <code>GET /assets/{id}/rms</code>, <code>GET /assets/{id}/spectrum</code>, <code>GET /assets/{id}/data-quality</code></td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td><span class="badge blue">Modelos</span></td>
+      <td><em>Qual modelo analisa esse ativo? Precisa de retreino?</em></td>
+      <td><code>GET /models/{id}</code>, <code>POST /models/{id}/request-retraining</code> ⚠️</td>
+    </tr>
+    <tr>
+      <td>6</td>
+      <td><span class="badge blue">Conhecimento</span></td>
+      <td><em>Existe procedimento ou glossário sobre isso?</em></td>
+      <td><code>GET /knowledge/search?q=...</code>, <code>GET /knowledge/{docId}</code></td>
+    </tr>
+    <tr>
+      <td>7</td>
+      <td><span class="badge red">Ações</span></td>
+      <td><em>Preciso escalar esse caso pra humano?</em></td>
+      <td><code>POST /cases/{id}/escalate</code> ⚠️</td>
+    </tr>
+  </table>
+
+  <p class="small">⚠️ = ação de impacto (exige justificação + <code>x-user-id</code>)</p>
+
+  <h2>Fluxo típico do agente (uma visita à fábrica)</h2>
+  <p>Imagine que um cliente abre um ticket dizendo: <em>"O motor M-605 tá vibrando
+  estranho, queria entender o que tá acontecendo"</em>. O agente faz isso:</p>
+
+  <ol class="steps">
+    <li><strong>Contexto:</strong> Pega os dados do cliente via
+        <code>getCurrentUser</code>. Descobre empresa, permissões e o ID do ativo.</li>
+    <li><strong>Baseline:</strong> Verifica se o "estado normal" do motor tá ok via
+        <code>getBaseline</code>. Se <code>learning</code> → não confia no diagnóstico.</li>
+    <li><strong>Análises:</strong> Lista diagnósticos automáticos via
+        <code>listAnalyses</code>. Verifica se tem insight com <code>detection_mode:
+        baseline</code> ou <code>symptom</code>.</li>
+    <li><strong>Dados Técnicos:</strong> Puxa RMS e espectro (<code>getRmsSeries</code>,
+        <code>getSpectrum</code>) pra entender o padrão de vibração. Verifica qualidade
+        dos dados via <code>getDataQuality</code>.</li>
+    <li><strong>Conhecimento:</strong> Busca procedimentos de manutenção
+        (<code>searchKnowledge</code>) pra orientar o cliente.</li>
+    <li><strong>Decisão:</strong> Com tudo isso, decide se orienta (explica), age
+        (reprocessa análise, solicita especialista) ou escala pro time.</li>
+  </ol>
+
+  <h2>Os nós do Grafo LangGraph</h2>
+  <p>O grafo é a <strong>mente</strong> do agente — decide o que fazer com tudo isso.</p>
+
+  <div class="card">
+    <pre><code>investigate → quality_check → decide → respond / act / escalate
+      ↑              ↓
+      └──────── incompleto (loop)</code></pre>
+  </div>
+
+  <ul>
+    <li><strong>investigate:</strong> chama as tools pra coletar dados (bloco 1–6).</li>
+    <li><strong>quality_check:</strong> verifica o [[Envelope de Resposta]] (Lição 2). É o dono da política: aceitar / repetir / escalar.</li>
+    <li><strong>decide:</strong> alimenta o LLM com tudo e escolhe: orientar, agir ou escalar.</li>
+    <li><strong>respond / act / escalate:</strong> executa a decisão.</li>
+  </ul>
+
+  <h2>Teste seu entendimento</h2>
+
+  <div class="qa">
+    <div class="q">Pergunta 1</div>
+    <div class="a">O agente recebe um ticket e descobre que o baseline está
+    <code>learning</code>. Ele deve confiar no próximo insight que encontrar?</div>
+    <details><summary>Resposta</summary>
+    <p><strong>Não.</strong> Baseline <code>learning</code> significa que o modelo ainda
+    não aprendeu o "normal" daquele ativo. Insights com <code>detection_mode:
+    baseline</code> são pouco confiáveis. O agente deve considerar isso antes de
+    confiar — pode ser necessário escalar ou buscar evidência de outro tipo
+    (ex: espectro).</p></details>
+  </div>
+
+  <div class="qa">
+    <div class="q">Pergunta 2</div>
+    <div class="a">Quais blocos a tool <code>getBaseline</code> e <code>getSpectrum</code>
+    pertencem? Quantos endpoints tem no bloco "Dados Técnicos"?</div>
+    <details><summary>Resposta</summary>
+    <p>Ambas pertencem ao bloco <strong>Dados Técnicos</strong>. São 4 endpoints:
+    baseline, RMS, espectro e qualidade dos dados.</p></details>
+  </div>
+
+  <div class="qa">
+    <div class="q">Pergunta 3</div>
+    <div class="a">O que acontece no grafo quando o <code>quality_check</code> retorna
+    <code>incomplete</code>?</div>
+    <details><summary>Resposta</summary>
+    <p>O grafo <strong>volta para <code>investigate</code></strong> (loop) pra tentar
+    buscar o dado faltante em outra tool. Se depois de algumas tentativas ainda estiver
+    incompleto, o <code>quality_check</code> pode mandar direto pra
+    <code>escalate</code>.</p></details>
+  </div>
+
+  <p><strong>Tem dúvidas?</strong> Pergunte ao agente — ele é seu professor e pode
+  explicar qualquer ponto deste texto.</p>
+
+  <p class="small"><em>Fontes primárias:
+  <code>docs/api-contract.openapi.yaml</code> ·
+  <code>CONTEXT.md</code> (glossário) ·
+  <code>agent/graph/nodes.py</code> (implementação dos nós)</em></p>
+</body>
+</html>

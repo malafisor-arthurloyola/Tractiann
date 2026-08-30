@@ -1,0 +1,32 @@
+# Glossário do Sistema Tractian
+
+> Referência rápida para consulta. Definições fonte: `CONTEXT.md`.
+
+## API / Dados
+- **Ativo (asset)** — máquina/equipamento monitorado. Ex.: motor M-605, bomba B-204.
+- **Baseline** — estado normal aprendido do próprio ativo. Estados: `learning` → `established` → `invalidated`.
+- **Espectro (FFT)** — gráfico de frequência que revela falhas por frequência característica.
+- **RMS** — valor médio da vibração (série temporal de amplitude).
+- **Insight / Análise** — diagnóstico automático do modelo. Tem tipo, severidade, confiança, evidência.
+- **Detection mode** — como a falha foi detectada: `baseline` (desvio) ou `symptom` (sintoma direto).
+
+## Envelope de Resposta
+- **Envelope** — formato `{mode, notes, data}` que toda resposta da API retorna.
+- **`complete`** — dados inteiros (~60% das respostas).
+- **`partial`** — campos faltando (~15%). Algumas chaves são removidas.
+- **`inconclusive`** — sem dados suficientes (~10%).
+- **`conflict`** — duas fontes discordam (~8%).
+- **`unavailable`** — fonte indisponível (~7%).
+
+## Arquitetura / Grafo
+- **MCP** — Model Context Protocol. Padrão para conectar agente a ferramentas externas.
+- **LangGraph** — framework para grafos de estado com loops condicionais.
+- **Seam** — costura entre camadas (onde uma peça pode ser trocada).
+- **Módulo raso (shallow)** — interface quase tão complexa quanto a implementação.
+- **Módulo profundo (deep)** — interface simples escondendo complexidade centralizada.
+- **Quality check node** — nó dedicado no grafo que decide o que fazer com respostas não-completas.
+
+## Agentes / IA
+- **Ticket (case)** — solicitação de suporte recebida pelo agente.
+- **Decisão** — resultado do agente: orientar (explicar) / agir (executar) / escalar (humano).
+- **Human-in-the-loop (HITL)** — pausa na execução até confirmação humana (antes de ações de impacto).
