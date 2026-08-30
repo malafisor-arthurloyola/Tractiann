@@ -63,6 +63,13 @@ up: up-api ## Sobe a API industrial (:8000) em background
 up-api: ## Só a API industrial (:8000) em background
 	$(UP_API_CMD)
 
+up-agent: ## Sobe a interface Streamlit (:8501)
+	api\.venv\Scripts\python.exe -m streamlit run app.py
+
+up-all: up-api ## Sobe a API e inicia o Streamlit
+	@echo "✓ Subindo interface do Agente..."
+	api\.venv\Scripts\python.exe -m streamlit run app.py
+
 stop: ## Para API industrial e agente
 	$(STOP_CMD)
 	@echo "✓ Serviços parados."

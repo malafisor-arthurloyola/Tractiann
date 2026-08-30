@@ -218,15 +218,30 @@ def decide(state: AgentState) -> dict:
     """
     verdict = state.get("quality_verdict", "ok")
 
-    # Sem dado crítico → escala direto (não arrisca decidir sem informação)
+    # Sem dado crítico → escala direto com dossiê técnico estruturado
     if verdict == "unavailable":
+        raw = state.get("raw") or {}
+        base_mode = raw.get("baseline", {}).get("mode", "inconclusivo")
+        an_mode = raw.get("analyses", {}).get("mode", "indisponível")
+        gaps_list = list(state.get("data_gaps", {}).keys())
+        gaps_str = ", ".join(gaps_list) if gaps_list else "baseline / análises"
+
+        dossie = (
+            f"📋 DOSSIÊ DE ESCALONAMENTO PARA SUPORTE TÉCNICO HUMANO\n\n"
+            f"1. Motivo do Escalonamento: Dados críticos essenciais para diagnóstico seguro estão indisponíveis na API (Baseline={base_mode}, Análises={an_mode}).\n"
+            f"2. Evidências Coletadas vs Lacunas: O sinal de RMS foi obtido, porém as lacunas em [{gaps_str}] impedem a validação técnica do limiar de alarme.\n"
+            f"3. Por que a IA não concluiu: Na Tractian, o limiar de vibração deriva do Baseline aprendido do ativo específico. Sem histórico homologado, não é seguro certificar se o alarme é real ou descalibração.\n"
+            f"4. Checklist de Ação para o Engenheiro de Suporte:\n"
+            f"   - [ ] Esclarecer ao cliente que o alarme é dinâmico (calculado pelo histórico da máquina) e não uma norma fixa.\n"
+            f"   - [ ] Inspecionar conectividade e qualidade do sensor no ativo '{state.get('asset_id')}'.\n"
+            f"   - [ ] Verificar se o baseline deste ativo precisa ser restabelecido na plataforma."
+        )
+
         return {
             "decision": "escalate",
-            "decision_justification": (
-                "Dados críticos indisponíveis (baseline/análises). Não é possível "
-                "diagnosticar com segurança — necessário intervenção humana."
-            ),
-            "trace": [{"node": "decide", "decision": "escalate", "reason": "data_unavailable"}],
+            "decision_justification": dossie,
+            "response": dossie,
+            "trace": [{"node": "decide", "decision": "escalate", "reason": "critical_data_unavailable", "gaps": gaps_list}],
         }
 
     # Monta contexto com dados coletados E gaps registrados

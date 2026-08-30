@@ -29,3 +29,12 @@ Abra **http://localhost:8000/docs** — Swagger UI para explorar.
 - **`make: *** No rule to make target`** — rode `make` a partir da raiz do projeto (onde está o `Makefile`).
 - **`uv: command not found`** — instale o uv (link acima) e abra um novo terminal.
 - **API não responde** — rode `make data` se você editou `seed_data.py` ou apagou `data/`.
+
+### 🧪 Como Rodar e Testar:
+
+    # 1. Iniciar API e Streamlit
+    make up-all
+
+    # 2. Acessar no navegador:
+    # Streamlit Console: http://localhost:8501
+    # API Docs:          http://localhost:8000/docs
