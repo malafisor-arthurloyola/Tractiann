@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L8 — Streamlit: construindo a janela do agente</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0007-observability.html">L7</a> ·
+    <strong>L8 — Streamlit</strong>
+  </header>
+
+  <h1>L8 — Streamlit: construindo a janela do agente</h1>
+
+  <p>O agente funciona no terminal. Mas para apresentar, testar e receber confirmações
+  humanas (HITL), precisamos de uma <strong>interface visual</strong>. O Streamlit é a
+  escolha mais rápida.</p>
+
+  <h2>Por que Streamlit?</h2>
+  <ul>
+    <li>Python puro — não precisa de HTML/CSS/JS separado.</li>
+    <li>Roda com um comando: <code>streamlit run app.py</code>.</li>
+    <li>Widgets interativos: botões, formulários, expanders.</li>
+    <li>Rápido para prototipar e demonstrar.</li>
+  </ul>
+
+  <h2>O que a interface vai ter</h2>
+
+  <div class="card">
+    <pre><code>┌─────────────────────────────────────────┐
+│  Tractian Agent · Ticket Explorer       │
+├─────────────────────────────────────────┤
+│  [Ticket] TKT-INV-11                    │
+│  "Motor de corrente contínua antigo..." │
+│  Ativo: asset_M102 · Usuário: usr_ana  │
+│                                         │
+│  [▶ Executar Agente]                   │
+├─────────────────────────────────────────┤
+│  📊 Resultado                           │
+│  ├─ Quality: partial                    │
+│  ├─ Gaps: rms, spectrum, analyses       │
+│  ├─ Decision: act                       │
+│  ├─ Justificativa: "Recomendamos..."    │
+│  │                                     │
+│  ├─ ⚠️ Ação de impacto detectada       │
+│  │   [✓ Confirmar]  [✗ Cancelar]       │
+│  │                                     │
+│  └─ Trace:                              │
+│     1. investigate → 5 tools chamadas   │
+│     2. quality_check → partial          │
+│     3. decide → act                     │
+│     4. act → INTERRUPT (esperando...)   │
+└─────────────────────────────────────────┘</code></pre>
+  </div>
+
+  <h2>Blocos principais do app</h2>
+
+  <ol class="steps">
+    <li><strong>Seletor de ticket</strong> — lê <code>cases.json</code>, lista tickets
+        em um dropdown.</li>
+    <li><strong>Botão "Executar"</strong> — roda o grafo com o ticket selecionado.</li>
+    <li><strong>Resultado</strong> — mostra quality_verdict, gaps, decisão, justificativa.</li>
+    <li><strong>Trace passo-a-passo</strong> — cada nó do grafo, com dados e timestamps.</li>
+    <li><strong>Confirmação HITL</strong> — se a decisão for <code>act</code>, mostra
+        botões de confirmar/cancelar (usa <code>interrupt()</code>).</li>
+  </ol>
+
+  <h2>Exemplo de código (pseudocódigo)</h2>
+
+  <pre><code>import streamlit as st
+from agent.graph.agent import agent_graph
+
+st.title("Tractian Agent")
+
+# Lista de tickets
+cases = load_cases()
+selected = st.selectbox("Ticket", cases, format_func=lambda c: f"{c['ticket_id']}: {c['message'][:50]}")
+
+if st.button("Executar"):
+    with st.spinner("Investigando..."):
+        result = agent_graph.invoke(initial_state(selected))
+
+    # Mostra resultado
+    st.metric("Quality", result["quality_verdict"])
+    st.metric("Decisão", result["decision"])
+
+    # Gaps
+    if result["data_gaps"]:
+        st.warning(f"Lacunas: {result['data_gaps']}")
+
+    # Justificativa
+    st.info(result["decision_justification"])
+
+    # Trace
+    with st.expander("Trace completo"):
+        for step in result["trace"]:
+            st.json(step)</code></pre>
+
+  <h2>Para o HITL (confirmação)</h2>
+  <p>O Streamlit pode receber o <code>interrupt()</code> do LangGraph e exibir botões
+  de confirmação. Quando o humano clica "Confirmar", o grafo retoma de onde parou.</p>
+
+  <div class="tip">
+    <strong>Dica:</strong> o Streamlit roda em <code>localhost:8501</code> por padrão.
+    Para HITL, você precisa de um <code>checkpoint_saver</code> (em memória ou Postgres)
+    para persistir o estado durante a pausa.
+  </div>
+
+  <h2>Teste seu entendimento</h2>
+
+  <div class="qa">
+    <div class="q">Pergunta 1</div>
+    <div class="a">Qual a diferença entre rodar o agente no terminal e rodar no
+    Streamlit?</div>
+    <details><summary>Resposta</summary>
+    <p>No terminal, o agente roda e imprime o resultado — sem interação. No
+    Streamlit, o usuário <strong>seleciona o ticket</strong>, <strong>clica pra
+    executar</strong>, <strong>visualiza o trace</strong>, e <strong>confirma ações
+    de impacto</strong>. É a mesma lógica, só com interface.</p></details>
+  </div>
+
+  <div class="qa">
+    <div class="q">Pergunta 2</div>
+    <div class="a">O agente decide "act" e o Streamlit mostra um botão de confirmação.
+    O que acontece por baixo dos panos?</div>
+    <details><summary>Resposta</summary>
+    <p>O <code>interrupt()</code> pausa o grafo e salva o estado. O Streamlit exibe
+    os botões e espera. Quando o humano clica "Confirmar", o estado é recuperado do
+    checkpoint e o grafo retoma — executando a ação de impacto.</p></details>
+  </div>
+
+  <p><strong>Tem dúvidas?</strong> Pergunte ao agente.</p>
+
+  <p class="small"><em>Fontes primárias:
+  <a href="https://docs.streamlit.io/">Streamlit Docs</a> ·
+  <a href="https://langchain-ai.github.io/langgraph/how-tos/human_in_the_loop/breakpoints/">LangGraph HITL</a></em></p>
+</body>
+</html>

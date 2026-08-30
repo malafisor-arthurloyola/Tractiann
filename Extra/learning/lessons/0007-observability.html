@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L7 — Observabilidade: Postgres, LangSmith e Phoenix</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0006-evaluation.html">L6</a> ·
+    <strong>L7 — Observabilidade</strong> ·
+    <a href="0008-streamlit.html">L8</a>
+  </header>
+
+  <h1>L7 — Observabilidade: Postgres, LangSmith e Phoenix</h1>
+
+  <p>O agente está rodando. Mas como você sabe <strong>o que ele fez</strong>,
+  <strong>por que decidiu aquilo</strong>, e <strong>se uma nova versão melhorou</strong>?
+  É aí que entra a observabilidade.</p>
+
+  <h2>Três ferramentas, três níveis</h2>
+
+  <table>
+    <tr>
+      <th>Ferramenta</th>
+      <th>Nível</th>
+      <th>O que guarda</th>
+      <th>Quando usar</th>
+    </tr>
+    <tr>
+      <td><span class="badge blue">Postgres</span></td>
+      <td>Log de execuções</td>
+      <td>Ticket, versão do agente, trace JSON, decisão, timestamp</td>
+      <td>Comparar versões, métricas agregadas, auditoria</td>
+    </tr>
+    <tr>
+      <td><span class="badge blue">LangSmith</span></td>
+      <td>Trace por chamada</td>
+      <td>Cada chamada ao LLM com input/output, latência, custo, tokens</td>
+      <td>Debugar por que o LLM respondeu X, debugar latência</td>
+    </tr>
+    <tr>
+      <td><span class="badge blue">Phoenix</span></td>
+      <td>Análise visual</td>
+      <td>Dashboard com traces, distribuições, comparações lado-a-lado</td>
+      <td>Análise exploratória, apresentação, comparação visual</td>
+    </tr>
+  </table>
+
+  <h2>Postgres — o diário do agente</h2>
+
+  <pre><code>-- Schema simples da tabela de execuções
+CREATE TABLE execucoes (
+    id            SERIAL PRIMARY KEY,
+    ticket_id     TEXT NOT NULL,
+    agent_version TEXT NOT NULL,
+    user_id       TEXT,
+    asset_id      TEXT,
+    decision      TEXT,           -- 'orient' | 'act' | 'escalate'
+    quality_verdict TEXT,         -- 'ok' | 'partial' | 'incomplete' | 'unavailable'
+    data_gaps     JSONB,          -- o que faltou
+    trace         JSONB,          -- chamadas à API + justificativas
+    response      TEXT,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);</code></pre>
+
+  <p>Com isso, você pode fazer queries como:</p>
+
+  <pre><code>-- Quantas vezes o agente escalou, por versão?
+SELECT agent_version, decision, COUNT(*)
+FROM execucoes
+GROUP BY agent_version, decision;
+
+-- Quais gaps mais comuns?
+SELECT jsonb_object_keys(data_gaps) AS gap_category, COUNT(*)
+FROM execucoes
+GROUP BY gap_category
+ORDER BY count DESC;
+
+-- Ticket que levou mais tentativas (retry)
+SELECT ticket_id, jsonb_array_length(trace) AS steps
+FROM execucoes
+ORDER BY steps DESC
+LIMIT 5;</code></pre>
+
+  <h2>LangSmith — o raio-X de cada chamada</h2>
+  <p>O LangSmith grava cada chamada ao LLM (input completo, output, tokens usados,
+  latência). Se o LLM respondeu algo errado no TKT-INV-11, você pode abrir o trace
+  e ver <strong>exatamente</strong> o que entrou e saiu do modelo.</p>
+
+  <div class="tip">
+    <strong>O que LangSmith mostra que o Postgres não mostra:</strong>
+    <ul>
+      <li>O prompt completo que foi enviado ao LLM</li>
+      <li>A resposta bruta do LLM (antes do parse)</li>
+      <li>Número de tokens usados e custo estimado</li>
+      <li>Latência de cada chamada</li>
+      <li>Se houve retry por timeout/rate-limit</li>
+    </ul>
+  </div>
+
+  <h2>Phoenix — a visão de cima</h2>
+  <p>O Phoenix (Arize) é um dashboard visual que mostra:
+  <ul>
+    <li>Distribuição de decisões (orient/act/escalate) ao longo do tempo</li>
+    <li>Comparação entre versões do agente</li>
+    <li>Traces side-by-side (v1 vs v2 do mesmo ticket)</li>
+    <li>Qualidade das respostas vs dados disponíveis</li>
+  </ul>
+
+  <h2>Como se conectam</h2>
+  <div class="card">
+    <pre><code>Agente executa ticket
+    ↓
+Postgres: salva resumo (decision, gaps, trace JSON)
+    ↓
+LangSmith: salva trace detalhado (cada chamada ao LLM)
+    ↓
+Phoenix: lê dos dois e cria dashboard visual</code></pre>
+  </div>
+
+  <h2>Teste seu entendimento</h2>
+
+  <div class="qa">
+    <div class="q">Pergunta 1</div>
+    <div class="a">O agente escalou o TKT-INV-11 porque o modelo antigo não tem dados
+    suficientes. Você quer investigar <strong>por que</strong> o LLM optou por
+    reprocessar em vez de escalar. Qual ferramenta você abriria primeiro?</div>
+    <details><summary>Resposta</summary>
+    <p><strong>LangSmith.</strong> Ele mostra o prompt completo (com os gaps registrados),
+    a resposta bruta do LLM, e se houve algum problema de parsing. O Postgres só
+    guarda o resumo; o Phoenix mostra a visão agregada.</p></details>
+  </div>
+
+  <div class="qa">
+    <div class="q">Pergunta 2</div>
+    <div class="a">Você criou uma v2 do agente e quer comparar com a v1. Quais
+    ferramentas usa?</div>
+    <details><summary>Resposta</summary>
+    <p><strong>Postgres</strong> para comparar métricas agregadas (taxa de acerto por
+    versão). <strong>Phoenix</strong> para comparar traces lado-a-lado do mesmo ticket.
+    <strong>LangSmith</strong> para inspecionar cada chamada LLM individualmente.</p></details>
+  </div>
+
+  <p><strong>Tem dúvidas?</strong> Pergunte ao agente.</p>
+
+  <p class="small"><em>Fontes primárias:
+  <a href="https://docs.smith.langchain.com/">LangSmith Docs</a> ·
+  <a href="https://docs.arize.com/phoenix">Phoenix Docs</a> ·
+  <a href="https://www.postgresql.org/docs/current/">PostgreSQL Docs</a></em></p>
+</body>
+</html>

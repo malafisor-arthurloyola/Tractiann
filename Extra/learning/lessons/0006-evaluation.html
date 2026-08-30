@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L6 — Avaliação: como saber se o agente acerta de verdade</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0005-human-in-the-loop.html">L5</a> ·
+    <strong>L6 — Avaliação</strong> ·
+    <a href="0007-observability.html">L7</a>
+  </header>
+
+  <h1>L6 — Avaliação: como saber se o agente acerta de verdade</h1>
+
+  <p>O agente respondeu um ticket. Parece bom. Mas <strong>acertou de verdade</strong>?
+  A avaliação é o que separa "funciona" de "funciona bem".</p>
+
+  <h2>Duas dimensões de avaliação</h2>
+
+  <div class="card">
+    <p><strong>1. Avaliação determinística</strong> — o agente fez as chamadas certas
+    à API, na ordem certa? Usou as evidências disponíveis?</p>
+    <p><strong>2. Avaliação subjetiva (juiz LLM)</strong> — a resposta final é clara,
+    honesta, segura e fundamentada?</p>
+  </div>
+
+  <p>As duas são necessárias. Uma sem a outra é incompleta.</p>
+
+  <h2>Exemplo real: o que aconteceu no TKT-INV-11</h2>
+
+  <table>
+    <tr><th>Etapa</th><th>O que o agente fez</th><th>Esperado (gabarito)</th><th>Bateu?</th></tr>
+    <tr>
+      <td>Chamadas à API</td>
+      <td>baseline → analyses → rms → spectrum → data_quality</td>
+      <td>baseline → analyses → rms → spectrum</td>
+      <td><span class="badge green">SIM</span></td>
+    </tr>
+    <tr>
+      <td>Quality check</td>
+      <td>partial (rms parcial, spectrum inconclusive, analyses vazio)</td>
+      <td>— (comportamento correto)</td>
+      <td><span class="badge green">SIM</span></td>
+    </tr>
+    <tr>
+      <td>Decisão</td>
+      <td>"Reprocessar a análise"</td>
+      <td>Escalamento (ativo antigo, sem dados)</td>
+      <td><span class="badge red">NÃO</span></td>
+    </tr>
+  </table>
+
+  <p>A <strong>avaliação determinística</strong> diz: chamadas corretas, orderm correta. ✅</p>
+  <p>A <strong>avaliação subjetiva</strong> diz: a decisão estava errada — deveria escalar. ❌</p>
+
+  <h2>Como funciona a suíte de avaliação</h2>
+
+  <pre><code># eval/runner.py (pseudocódigo)
+def run_evaluation(agent, cases):
+    results = []
+    for case in cases:
+        # 1. Rodo o agente
+        trace = agent.run(case)
+
+        # 2. Avaliação determinística (pytest)
+        trajectory_ok = assert_trajectory(trace, expected_path)
+
+        # 3. Avaliação subjetiva (juiz LLM)
+        judge_verdict = judge_llm(
+            ticket=case,
+            response=trace.response,
+            gaps=trace.data_gaps,
+        )
+
+        results.append({
+            "case": case.id,
+            "trajectory": trajectory_ok,
+            "judge_score": judge_verdict.score,
+            "judge_reasoning": judge_verdict.reasoning,
+        })
+    return results</code></pre>
+
+  <h2>Métricas que medimos</h2>
+
+  <table>
+    <tr><th>Métrica</th><th>O que mede</th><th>Tipo</th></tr>
+    <tr><td>Acurácia da causa-raiz</td><td>Identificou corretamente o problema?</td><td>Determinística</td></tr>
+    <tr><td>Uso de evidências</td><td>Citou os dados que coletou?</td><td>Determinística</td></tr>
+    <tr><td>Honestidade sob incerteza</td><td>Reconheceu lacunas? Não inventou?</td><td>Subjetiva</td></tr>
+    <tr><td>Taxa de over-escalation</td><td>Escala quando não precisa?</td><td>Determinística</td></tr>
+    <tr><td>Taxa de under-escalation</td><td>Age quando deveria escalar?</td><td>Determinística</td></tr>
+    <tr><td>Qualidade da justificativa</td><td>A justificativa é clara e fundamentada?</td><td>Subjetiva</td></tr>
+    <tr><td>Consistência</td><td>Roda o mesmo ticket 5x, dá a mesma resposta?</td><td>Determinística</td></tr>
+  </table>
+
+  <h2>O juiz LLM — como funciona na prática</h2>
+  <p>O juiz LLM recebe: o ticket, a resposta do agente, os gaps registrados, e o
+  gabarito (expected_path). Ele avalia se a resposta é adequada, honesta e fundamentada.</p>
+
+  <div class="tip">
+    <strong>Por que um LLM avalia outro LLM?</strong> Porque respostas como "é
+    recomendável reprocessar" são <strong>subjetivas</strong> — um teste determinístico
+    sozinho não consegue dizer se a resposta é boa ou ruim. O juiz LLM simula o que
+    um engenheiro humano de suporte pensaria.
+  </div>
+
+  <h2>Teste seu entendimento</h2>
+
+  <div class="qa">
+    <div class="q">Pergunta 1</div>
+    <div class="a">No TKT-INV-11, a avaliação determinística passou mas a subjetiva
+    falhou. Por que isso é útil?</div>
+    <details><summary>Resposta</summary>
+    <p>Porque mostra que o agente <strong>investigou certo</strong> (usou as tools
+    certas) mas <strong>decidiu errado</strong> (recomendou ação sem dado suficiente).
+    Sem as duas avaliações, só veríamos uma metade do problema.</p></details>
+  </div>
+
+  <div class="qa">
+    <div class="q">Pergunta 2</div>
+    <div class="a">O que seria "consistência" e por que ela importa?</div>
+    <details><summary>Resposta</summary>
+    <p>Se você roda o mesmo ticket 5 vezes e o agente dá 5 respostas diferentes,
+    ele não é confiável. A consistência mede se o agente é <strong>determinístico</strong>
+    nas suas decisões — e se não é, se as variações são aceitáveis.</p></details>
+  </div>
+
+  <p><strong>Tem dúvidas?</strong> Pergunte ao agente.</p>
+
+  <p class="small"><em>Fontes primárias:
+  <a href="https://docs.smith.langchain.com/">LangSmith Docs</a> ·
+  <code>eval/expected-paths.json</code> ·
+  <code>docs/test-scenarios.md</code></em></p>
+</body>
+</html>

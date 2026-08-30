@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L5 — Human-in-the-loop: por que pausar é melhor que agir</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0003-tractian-system-map.html">L3</a> ·
+    <a href="0004-tool-flow-incomplete.html">L4</a> ·
+    <strong>L5 — HITL</strong> ·
+    <a href="0006-evaluation.html">L6</a>
+  </header>
+
+  <h1>L5 — Human-in-the-loop: por que pausar é melhor que agir</h1>
+
+  <p>Seu agente decidiu que precisa reprocessar uma análise ou solicitar um retreinamento.
+  Essas ações alteram o estado da plataforma industrial. E se ele estiver errado?</p>
+
+  <h2>O problema</h2>
+  <p>Imagine que o agente, vendo dados incompletos (como no ticket TKT-INV-11), decide
+  "reprocessar a análise". Mas o correto seria escalar pra humano — afinal, o ativo é
+  um motor de corrente contínua antigo e o modelo não tem dados suficientes.</p>
+
+  <div class="card">
+    <p><strong>Dados que o LLM viu (TKT-INV-11):</strong></p>
+    <ul>
+      <li>Baseline: parcial (sem features)</li>
+      <li>RMS: parcial (sem samples)</li>
+      <li>Espectro: <em>inconclusive</em> — sem espectro disponível</li>
+      <li>Análises: nenhuma encontrada</li>
+    </ul>
+    <p>O LLM optou por "recomendar reprocessar" — mas sem espectro e sem análises,
+    isso é perigoso: reprocessar sem dado de entrada pode gerar um insight sem base.</p>
+  </div>
+
+  <h2>A solução: <code>interrupt()</code></h2>
+  <p>O LangGraph tem um mecanismo nativo chamado <code>interrupt()</code> que
+  <strong>pausa a execução do grafo</strong> e aguarda confirmação humana antes de
+  prosseguir.</p>
+
+  <pre><code># Pseudocódigo do nó act com interrupt
+def act(state):
+    if is_action_of_impact(state):
+        result = interrupt({
+            "action": state["decision"],
+            "justification": state["decision_justification"],
+            "asset_id": state["asset_id"],
+            "gaps": state["data_gaps"],
+        })
+        # O grafo SÓ continua quando o humano confirma
+        # result = True (confirmado) ou False (cancelado)
+        if not result:
+            return {"decision": "escalate"}
+    # Executa a ação
+    execute_action(state)</code></pre>
+
+  <h2>O ciclo de vida de uma interrupção</h2>
+  <ol class="steps">
+    <li><strong>Grafo roda normalmente</strong> até o nó <code>act</code>.</li>
+    <li><strong><code>interrupt()</code> pausa</strong> — o estado é salvo
+        (checkpoint).</li>
+    <li><strong>Interface (Streamlit) mostra</strong> a justificativa do agente,
+        os dados coletados, os gaps.</li>
+    <li><strong>Humano confirma ou cancela.</strong></li>
+    <li><strong>Grafo retoma</strong> de onde parou — como se o humano tivesse
+        respondido naquele ponto.</li>
+  </ol>
+
+  <h2>Quando pausar? A regra</h2>
+  <table>
+    <tr><th>Tipo de ação</th><th>Exemplo</th><th>Pausar?</th></tr>
+    <tr><td>Só consultar (orientar)</td><td>Explicar o baseline ao cliente</td><td><span class="badge green">NÃO</span></td></tr>
+    <tr><td>Ação de impacto baixo</td><td>Reprocessar análise</td><td><span class="badge warn">SIM</span></td></tr>
+    <tr><td>Ação de impacto alto</td><td>Solicitar retreinamento, alterar config</td><td><span class="badge red">SIM, obrigatório</span></td></tr>
+    <tr><td>Escalar</td><td>Encaminhar pra humano</td><td><span class="badge green">NÃO</span> (o humano é o destinatário)</td></tr>
+  </table>
+
+  <h2>Teste seu entendimento</h2>
+
+  <div class="qa">
+    <div class="q">Pergunta 1</div>
+    <div class="a">Por que <code>orientar</code> não precisa de pausa, mas
+    <code>reprocessar</code> precisa?</div>
+    <details><summary>Resposta</summary>
+    <p><strong>Orientar</strong> é só explicar — não altera nada na plataforma.
+    <strong>Reprocessar</strong> manda um job de processamento que pode gastar
+    recursos e gerar um novo insight que o cliente vai ver. Se estiver errado,
+    o cliente confia num diagnóstico inválido.</p></details>
+  </div>
+
+  <div class="qa">
+    <div class="q">Pergunta 2</div>
+    <div class="a">O que acontece com o estado do grafo enquanto o humano
+    confirma?</div>
+    <details><summary>Resposta</summary>
+    <p>O estado é salvo via <strong>checkpoint</strong> (pode ser em memória ou em
+    Postgres). Quando o humano confirma, o grafo retoma exatamente de onde parou —
+    como se tivesse um "snapshot" do momento da pausa.</p></details>
+  </div>
+
+  <p><strong>Tem dúvidas?</strong> Pergunte ao agente.</p>
+
+  <p class="small"><em>Fontes primárias:
+  <a href="https://langchain-ai.github.io/langgraph/how-tos/human_in_the_loop/breakpoints/">LangGraph — Human in the Loop</a> ·
+  <code>agent/graph/nodes.py</code> (função act)</em></p>
+</body>
+</html>
