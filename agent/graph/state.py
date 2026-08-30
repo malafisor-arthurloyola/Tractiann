@@ -33,6 +33,9 @@ class AgentState(TypedDict):
     # --- Decisão do agente ---
     decision: Literal["orient", "act", "escalate"] | None
     decision_justification: str | None
+    # Ação específica a executar (quando decision == "act")
+    action_type: Literal["reprocess", "specialist", "retrain", "update_config"] | None
+    action_target: str | None  # analysis_id / model_id / asset_id, conforme action_type
 
     # --- Resposta final ---
     response: str | None
