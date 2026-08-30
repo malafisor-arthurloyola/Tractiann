@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>L14 — API Industrial e Ferramentas MCP</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0013-evaluation-llm-judge.html">L13</a> ·
+    <strong>L14 — API & MCP</strong>
+  </header>
+
+  <h1>L14 — API Industrial & 17 Ferramentas MCP</h1>
+
+  <p>O agente não "sabe" nada; ele <strong>consulta a API</strong> via ferramentas. Cada chamada retorna um <strong>Envelope</strong> com campo <code>mode</code>.</p>
+
+  <h2>Modos de Envelope</h2>
+  <table>
+    <tr><th>Mode</th><th>Significado</th></tr>
+    <tr><td>complete</td><td>Dados íntegros, suficiente para decisão</td></tr>
+    <tr><td>partial</td><td>Dados incompletos, mas úteis</td></tr>
+    <tr><td>inconclusive</td><td>Não dá pra concluir (ruído, SNR baixo)</td></tr>
+    <tr><td>conflict</td><td>Dados conflitam (ex: baseline vs análise)</td></tr>
+    <tr><td>unavailable</td><td>Serviço fora do ar / não implementado</td></tr>
+  </table>
+
+  <h2>As 17 Ferramentas (agent/tools/)</h2>
+  <ul>
+    <li><strong>Contexto:</strong> get_company, get_user, get_asset</li>
+    <li><strong>Sinais:</strong> get_rms, get_spectrum, get_baseline, get_data_quality</li>
+    <li><strong>Análises:</strong> get_analyses, get_analysis_detail</li>
+    <li><strong>Ações (POST/PATCH):</strong> reprocess_analysis, request_specialist, request_retraining, update_asset_config, escalate_case</li>
+  </ul>
+
+  <h2>MCP Server</h2>
+  <p>O servidor MCP expõe essas funções como <code>tools</code> para o LLM. O agente decide <em>qual</em> chamar; o MCP executa e devolve o envelope.</p>
+</body>
+</html>

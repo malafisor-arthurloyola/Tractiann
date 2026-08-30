@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>L16 — Produção: Checkpointers, Segurança e Observabilidade</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0015-extensibility.html">L15</a> ·
+    <strong>L16 — Produção</strong>
+  </header>
+
+  <h1>L16 — Produção: Do Dev ao Deploy</h1>
+
+  <h2>Checkpointer: MemorySaver → Postgres</h2>
+  <p>Em dev usamos <code>MemorySaver</code> (estado em RAM). Em produção, <strong>obrigatório</strong> usar <code>PostgresSaver</code> (LangGraph) para persistir estado de HITL entre reinícios e múltiplas instâncias.</p>
+  <pre><code>from langgraph.checkpoint.postgres import PostgresSaver
+with PostgresSaver.from_conn_string(DATABASE_URL) as checkpointer:
+    graph = builder.compile(checkpointer=checkpointer)</code></pre>
+
+  <h2>Segurança</h2>
+  <ul>
+    <li><strong>Secrets:</strong> Nunca commit <code>agent/.env</code>. Use variáveis de ambiente no CI/CD.</li>
+    <li><strong>Rate Limits:</strong> Respeite limites da API Industrial e Groq/OpenRouter.</li>
+    <li><strong>Permissões:</strong> Ações <code>action_high</code> (retrain, update_config) exigem roles específicas.</li>
+  </ul>
+
+  <h2>Monitoramento Contínuo</h2>
+  <ul>
+    <li><strong>Phoenix:</strong> Dashboards de latência, tokens, erros de parsing.</li>
+    <li><strong>Postgres:</strong> <code>make compare-versions</code> semanal para detectar regressão.</li>
+    <li><strong>Alertas:</strong> Se <code>escalate</code> rate > 20%, investigar.</li>
+  </ul>
+
+  <h2>CI/CD Sugerido</h2>
+  <pre><code># GitHub Actions
+- make setup
+- make test
+- make eval --split train
+- bump AGENT_VERSION (se passou)
+- deploy container</code></pre>
+
+  <h2>Versionamento Semântico do Agente</h2>
+  <table>
+    <tr><th>Versão</th><th>Quando Bumpar</th></tr>
+    <tr><td>Patch (v1.0.1)</td><td>Bug fix em tool / prompt</td></tr>
+    <tr><td>Minor (v1.1.0)</td><td>Nova tool / action de leitura</td></tr>
+    <tr><td>Major (v2.0.0)</td><td>Mudança de grafo / decisão / baseline logic</td></tr>
+  </table>
+</body>
+</html>

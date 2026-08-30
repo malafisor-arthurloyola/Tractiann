@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>L15 — Extensibilidade: Novas Tools e Ações</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0014-api-mcp-tools.html">L14</a> ·
+    <strong>L15 — Extensibilidade</strong>
+  </header>
+
+  <h1>L15 — Como Adicionar Novas Ferramentas e Ações</h1>
+
+  <h2>1. Nova Tool de Leitura (GET)</h2>
+  <ol>
+    <li>Crie <code>agent/tools/nova_tool.py</code> com função <code>async def fetch_nova(...) -> dict</code>.</li>
+    <li>Registre no <code>agent/tools/__init__.py</code>.</li>
+    <li>Adicione caso em <code>agent/graph/nodes.py</code> no nó <code>investigate</code> (palavras-chave).</li>
+    <li>Teste: <code>make eval --split train</code>.</li>
+  </ol>
+
+  <h2>2. Nova Ação de Impacto (POST/PATCH)</h2>
+  <ol>
+    <li>Adicione endpoint na API Industrial (<code>api/app/main.py</code>).</li>
+    <li>Crie tool em <code>agent/tools/acao_nova.py</code>.</li>
+    <li>Atualize <code>_extract_action()</code> em <code>nodes.py</code> para detectar palavras-chave.</li>
+    <li>Adicione URL em <code>_build_action_url()</code>.</li>
+    <li>Teste HITL na UI Streamlit.</li>
+  </ol>
+
+  <h2>3. Novo Nó no Grafo</h2>
+  <p>Se precisar de lógica complexa entre investigate e decide:</p>
+  <ol>
+    <li>Crie função em <code>nodes.py</code>.</li>
+    <li>Adicione nó no <code>agent/graph/agent.py</code> (grafo compilado).</li>
+    <li>Atualize arestas/rotas condicionais.</li>
+  </ol>
+</body>
+</html>

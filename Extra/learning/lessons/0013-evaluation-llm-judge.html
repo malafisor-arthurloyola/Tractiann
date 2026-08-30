@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>L13 — Avaliação e Juiz LLM</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0012-testing-and-next.html">L12</a> ·
+    <strong>L13 — Avaliação e Juiz LLM</strong>
+  </header>
+
+  <h1>L13 — Avaliação: Medindo a Honestidade da IA</h1>
+
+  <p>Não basta o agente responder; ele precisa responder <strong>corretamente</strong> e com <strong>segurança</strong>. Como garantimos que o agente não está alucinando?</p>
+
+  <h2>A Pirâmide de Avaliação</h2>
+  <ul>
+    <li><strong>Testes Unitários (pytest):</strong> Valida lógica determinística (rotas, parsing).</li>
+    <li><strong>Avaliação de Trajetória (eval/runner):</strong> Verifica se o agente seguiu os passos corretos (ground truth).</li>
+    <li><strong>Juiz LLM (llm_judge):</strong> Avalia qualitativamente a resposta final (honestidade, clareza, fundamentação).</li>
+  </ul>
+
+  <h2>Como funciona o Juiz?</h2>
+  <p>O juiz é outro LLM que recebe o input, a resposta do agente e os dados coletados. Ele atribui notas (0-10) baseadas em critérios de suporte industrial:</p>
+  <ul>
+    <li><strong>Honestidade:</strong> O agente inventou dados?</li>
+    <li><strong>Fundamentação:</strong> A resposta se baseia nas ferramentas consultadas?</li>
+    <li><strong>Segurança:</strong> A resposta respeita os limites de operação?</li>
+  </ul>
+
+  <p><strong>Comando para rodar:</strong> <code>make run</code> ou <code>make prova-final</code> (roda o juiz automaticamente).</p>
+</body>
+</html>

@@ -552,83 +552,86 @@ def render_ticket_card(case: Dict[str, Any]):
 
 
 def render_handoff_support_ticket(case: Dict[str, Any], result: Dict[str, Any]):
-    """Renderiza um Painel de Chamado de Suporte / Handoff estilo Zendesk/ServiceNow."""
+    """Renderiza um Painel de Chamado de Suporte / Handoff usando componentes nativos Streamlit."""
     decision = result.get("decision")
     if decision != "escalate":
         return
 
     gaps = result.get("data_gaps") or result.get("gaps") or {}
     gaps_str = ", ".join(gaps.keys()) if isinstance(gaps, dict) and gaps else "Dados críticos não confirmados"
-    raw = result.get("raw", {})
     ticket_id = case.get("ticket_id", "TKT-UNKNOWN")
     assigned_key = f"assigned_tech_{ticket_id}"
 
-    st.markdown(f"""
-    <div style="background:#181b24; border:1px solid #dc2626; border-left:6px solid #ef4444; border-radius:10px; padding:20px; margin-bottom:18px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #2d3142; padding-bottom:12px; margin-bottom:14px;">
-            <div>
-                <span style="background:#3d1f1f; color:#f87171; font-weight:700; font-size:11px; padding:4px 10px; border-radius:14px; border:1px solid #7f1d1d; margin-right:8px;">
-                    🎫 CHAMADO DE SUPORTE ESCALADO
-                </span>
-                <span style="font-size:15px; font-weight:700; color:#fff;">{ticket_id}</span>
-            </div>
-            <div>
-                <span style="background:#2e2010; color:#f59e0b; font-weight:600; font-size:11px; padding:4px 10px; border-radius:14px; border:1px solid #78350f;">
-                    🟡 Aguardando Atendimento Humano
-                </span>
-            </div>
-        </div>
+    # Container principal do chamado
+    with st.container(border=True):
+        # Cabeçalho do chamado
+        col_header1, col_header2 = st.columns([3, 1])
+        with col_header1:
+            st.markdown("### 🎫 CHAMADO DE SUPORTE ESCALADO")
+            st.caption(f"Ticket ID: `{ticket_id}`")
+        with col_header2:
+            st.markdown("<div style='text-align:right; margin-top:8px;'></div>", unsafe_allow_html=True)
+            st.badge("🟡 Aguardando Atendimento Humano", color="orange")
 
-        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:10px; margin-bottom:14px; font-size:12px; color:#8892a0;">
-            <div><b>🏢 Cliente:</b> <span style="color:#e2e8f0;">{case.get('company_id','').replace('comp_','').replace('_',' ').title()}</span></div>
-            <div><b>⚙️ Ativo:</b> <span style="color:#60a5fa; font-weight:600;">{case.get('asset_id','')}</span></div>
-            <div><b>👤 Solicitante:</b> <span style="color:#c084fc;">{case.get('user_id','')}</span></div>
-            <div><b>⚠️ Motivo Bloqueio IA:</b> <span style="color:#fca5a5;">Lacunas Críticas ({gaps_str})</span></div>
-        </div>
+        st.divider()
 
-        <div style="background:#0f1117; border:1px solid #2d3142; border-radius:8px; padding:14px; margin-bottom:14px;">
-            <div style="font-size:12px; font-weight:700; color:#f87171; text-transform:uppercase; margin-bottom:6px;">
-                🛑 Por que o Agente não finalizou automaticamente?
-            </div>
-            <div style="font-size:13px; color:#e2e8f0; line-height:1.5;">
-                O agente coletou sinais preliminares, mas o estado do <b>Baseline</b> ou das <b>Análises</b> veio com inconsistência/indisponibilidade na API industrial. Na metodologia Tractian, limiares de vibração derivam do comportamento aprendido da máquina. Para evitar passar falsos diagnósticos ao cliente, o atendimento foi repassado para a engenharia de suporte.
-            </div>
-        </div>
+        # Grid de informações do chamado
+        st.markdown("**📋 Contexto do Chamado**")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("🏢 Cliente", case.get('company_id', '').replace('comp_','').replace('_',' ').title())
+        with c2:
+            st.metric("⚙️ Ativo", case.get('asset_id', '—'))
+        with c3:
+            st.metric("👤 Solicitante", case.get('user_id', '—'))
+        with c4:
+            st.metric("⚠️ Bloqueio IA", gaps_str, help="Lacunas críticas detectadas nos sinais")
 
-        <div style="background:#0f1117; border:1px solid #2d3142; border-radius:8px; padding:14px; margin-bottom:14px;">
-            <div style="font-size:12px; font-weight:700; color:#60a5fa; text-transform:uppercase; margin-bottom:6px;">
-                🛠️ Ações Recomendadas para o Engenheiro Humano:
-            </div>
-            <div style="font-size:13px; color:#cbd5e1; line-height:1.6;">
-                1. <b>Orientar o Cliente:</b> Explicar que o alarme é dinâmico (baseado no histórico da máquina) e não uma norma fixa genérica.<br/>
-                2. <b>Verificar Sensor:</b> Inspecionar se o sensor do ativo <code>{case.get('asset_id','')}</code> teve perda de sinal ou ruído.<br/>
-                3. <b>Recalibrar Baseline:</b> Validar se o baseline precisa ser restabelecido na plataforma após intervenção mecânica.
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+        # Por que o agente não finalizou
+        with st.expander("🛑 **Por que o Agente não finalizou automaticamente?**", expanded=True):
+            st.markdown("""
+            O agente coletou sinais preliminares, mas o estado do **Baseline** ou das **Análises** veio com 
+            inconsistência/indisponibilidade na API industrial. 
+            
+            Na metodologia Tractian, limiares de vibração derivam do comportamento aprendido da máquina (baseline próprio do ativo). 
+            Para evitar passar falsos diagnósticos ao cliente, o atendimento foi repassado para a engenharia de suporte.
+            """)
 
-    # Controles de Atribuição de Técnico
-    c1, c2, c3 = st.columns([2, 1.2, 1.8])
-    with c1:
-        tech_assigned = st.selectbox(
-            "Atribuir Técnico Responsável:",
-            options=[
-                "Eng. Carlos Silva (Especialista em Vibração e Preditiva)",
-                "Eng. Ana Souza (Suporte N3 & Diagnóstico de Ativos)",
-                "Eng. Rodrigo Lima (Engenharia de Conectividade e Sensores)",
-                "Eng. Juliana Costa (Especialista em Modelos e Baselines)",
-            ],
-            key=f"select_{assigned_key}",
-        )
-    with c2:
-        st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-        if st.button("📌 Assumir Chamado", key=f"btn_assign_{ticket_id}"):
-            st.session_state[assigned_key] = tech_assigned
-            st.success(f"✅ Chamado atribuído a {tech_assigned.split('(')[0].strip()}!")
+        # Ações recomendadas
+        with st.expander("🛠️ **Ações Recomendadas para o Engenheiro Humano**", expanded=True):
+            st.markdown(f"""
+            1. **Orientar o Cliente:** Explicar que o alarme é dinâmico (baseado no histórico da máquina) e não uma norma fixa genérica.
+            
+            2. **Verificar Sensor:** Inspecionar se o sensor do ativo `{case.get('asset_id','')}` teve perda de sinal ou ruído.
+            
+            3. **Recalibrar Baseline:** Validar se o baseline precisa ser restabelecido na plataforma após intervenção mecânica.
+            """)
 
-    if assigned_key in st.session_state:
-        st.info(f"👨‍🔧 **Chamado sob responsabilidade de:** `{st.session_state[assigned_key]}`")
+        # Controles de Atribuição de Técnico
+        st.markdown("---")
+        st.markdown("**👨‍🔧 Atribuição de Responsável**")
+        
+        c1, c2, c3 = st.columns([2.5, 1.2, 1.3])
+        with c1:
+            tech_assigned = st.selectbox(
+                "Técnico Responsável:",
+                options=[
+                    "Eng. Carlos Silva (Especialista em Vibração e Preditiva)",
+                    "Eng. Ana Souza (Suporte N3 & Diagnóstico de Ativos)",
+                    "Eng. Rodrigo Lima (Engenharia de Conectividade e Sensores)",
+                    "Eng. Juliana Costa (Especialista em Modelos e Baselines)",
+                ],
+                key=f"select_{assigned_key}",
+            )
+        with c2:
+            st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+            if st.button("📌 Assumir Chamado", key=f"btn_assign_{ticket_id}", type="primary", use_container_width=True):
+                st.session_state[assigned_key] = tech_assigned
+                st.success(f"✅ Chamado atribuído a {tech_assigned.split('(')[0].strip()}!")
+                st.rerun()
+
+        if assigned_key in st.session_state:
+            st.success(f"👨‍🔧 **Chamado sob responsabilidade de:** `{st.session_state[assigned_key]}`")
 
 
 def render_result_cards(result: Dict[str, Any], elapsed: Optional[float] = None):
@@ -938,8 +941,59 @@ def render_node_gap_inspector(result: Dict[str, Any]):
         st.code(result.get("response", "—"))
 
 
+def render_trace_timeline(result: Dict[str, Any]):
+    """Renderiza timeline visual nativa do Streamlit (st.status) dos passos do agente."""
+    trace = result.get("trace", [])
+    if not trace:
+        st.info("Nenhum trace de execução disponível.")
+        return
+    
+    st.markdown("#### ⏱️ Timeline de Execução do Agente")
+    
+    node_config = {
+        "investigate": {"icon": "🔍", "label": "Investigação de Sinais", "color": "green"},
+        "quality_check": {"icon": "📊", "label": "Verificação de Qualidade", "color": "orange"},
+        "decide": {"icon": "🧠", "label": "Decisão do Agente", "color": "violet"},
+        "act": {"icon": "⚡", "label": "Ação de Impacto (HITL)", "color": "red"},
+        "respond": {"icon": "💬", "label": "Resposta ao Cliente", "color": "green"},
+        "escalate": {"icon": "🎫", "label": "Escalonamento para Humano", "color": "red"},
+    }
+    
+    for i, step in enumerate(trace, 1):
+        node = step.get("node", "unknown")
+        config = node_config.get(node, {"icon": "⚙️", "label": node.upper(), "color": "gray"})
+        
+        with st.status(f"{config['icon']} Passo {i}: {config['label']}", expanded=False, state="complete"):
+            cols = st.columns([1, 3])
+            with cols[0]:
+                st.markdown(f"**Nó:** `{node}`")
+                if "verdict" in step:
+                    st.markdown(f"**Veredito:** `{step['verdict'].upper()}`")
+                if "decision" in step:
+                    st.markdown(f"**Decisão:** `{step['decision'].upper()}`")
+                if "action" in step:
+                    st.markdown(f"**Ação:** `{step['action']}`")
+            with cols[1]:
+                details = []
+                if "tools_called" in step:
+                    details.append(f"🔧 Tools: {', '.join(step['tools_called'])}")
+                if "gaps" in step and step["gaps"]:
+                    gaps = step["gaps"]
+                    if isinstance(gaps, dict):
+                        details.append(f"⚠️ Gaps: {', '.join(gaps.keys())}")
+                if "reason" in step:
+                    details.append(f"💭 Razão: {step['reason']}")
+                if "from_cache" in step:
+                    details.append(f"⚡ Cache: {'Sim' if step['from_cache'] else 'Não'}")
+                if details:
+                    for d in details:
+                        st.markdown(f"- {d}")
+                else:
+                    st.caption("—")
+
+
 def tab_trace(result: Optional[Dict[str, Any]]):
-    """Aba de visualização técnica com fluxograma visual conectado, inspetor de nós e sinais."""
+    """Aba de visualização técnica."""
     if not result:
         st.info("Nenhum resultado disponível. Execute um ticket na barra lateral primeiro.")
         return
@@ -947,10 +1001,14 @@ def tab_trace(result: Optional[Dict[str, Any]]):
     render_visual_connected_graph(result)
     render_node_gap_inspector(result)
     st.markdown("<hr style='border-color:#2d3142; margin:20px 0;'>", unsafe_allow_html=True)
+    
+    # Corrigido: chamando a função correta render_trace_timeline
     render_trace_timeline(result)
+    
     raw = result.get("raw", {})
     if raw:
         render_technical_signals(raw)
+
 
 
 
