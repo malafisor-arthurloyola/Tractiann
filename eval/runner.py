@@ -61,6 +61,8 @@ def build_initial_state(case: dict) -> dict:
         "tools_called": [],
         "decision": None,
         "decision_justification": None,
+        "action_type": None,
+        "action_target": None,
         "response": None,
         "trace": [],
     }

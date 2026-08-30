@@ -24,7 +24,8 @@ for i, case in enumerate(cases[:12], 1):
         "asset_id": case["asset_id"], "message": case["message"],
         "raw": {}, "quality_verdict": None,
         "quality_notes": None, "data_gaps": {}, "next_tool": None,
-        "tools_called": [], "decision": None, "decision_justification": None,
+        "tools_called": [],         "decision": None, "decision_justification": None,
+        "action_type": None, "action_target": None,
         "response": None, "trace": [],
     }
     try:
