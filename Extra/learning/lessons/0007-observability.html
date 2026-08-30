@@ -22,7 +22,8 @@
 
   <p class="note">Sobre a escolha: a <strong>LangSmith</strong> (da LangChain) faz esse
   papel, mas é <strong>paga</strong>. Usamos o <strong>Phoenix (Arize)</strong>, que é o
-  equivalente <strong>gratuito e open source</strong> — mesmo padrão OpenTelemetry.</p>
+  equivalente <strong>gratuito e open source</strong> — mesmo padrão OpenTelemetry.
+  (<em>Ver L11 para detalhes de infraestrutura</em>).</p>
 
   <h2>Duas ferramentas, dois níveis</h2>
 
@@ -93,13 +94,13 @@ FROM execucoes
 ORDER BY steps DESC
 LIMIT 5;</code></pre>
 
-  <h2>LangSmith — o raio-X de cada chamada</h2>
-  <p>O LangSmith grava cada chamada ao LLM (input completo, output, tokens usados,
+  <h2>Phoenix — o raio-X de cada chamada</h2>
+  <p>O Phoenix (Arize) grava cada chamada ao LLM (input completo, output, tokens usados,
   latência). Se o LLM respondeu algo errado no TKT-INV-11, você pode abrir o trace
   e ver <strong>exatamente</strong> o que entrou e saiu do modelo.</p>
 
   <div class="tip">
-    <strong>O que LangSmith mostra que o Postgres não mostra:</strong>
+    <strong>O que o Phoenix mostra que o Postgres não mostra:</strong>
     <ul>
       <li>O prompt completo que foi enviado ao LLM</li>
       <li>A resposta bruta do LLM (antes do parse)</li>
@@ -124,9 +125,8 @@ LIMIT 5;</code></pre>
     ↓
 Postgres: salva resumo (decision, gaps, trace JSON)
     ↓
-LangSmith: salva trace detalhado (cada chamada ao LLM)
-    ↓
-Phoenix: lê dos dois e cria dashboard visual</code></pre>
+Phoenix: salva trace detalhado (cada chamada ao LLM)
+    → Dashboard em http://localhost:6006</code></pre>
   </div>
 
   <h2>Teste seu entendimento</h2>
@@ -137,7 +137,7 @@ Phoenix: lê dos dois e cria dashboard visual</code></pre>
     suficientes. Você quer investigar <strong>por que</strong> o LLM optou por
     reprocessar em vez de escalar. Qual ferramenta você abriria primeiro?</div>
     <details><summary>Resposta</summary>
-    <p><strong>LangSmith.</strong> Ele mostra o prompt completo (com os gaps registrados),
+    <p><strong>Phoenix.</strong> Ele mostra o prompt completo (com os gaps registrados),
     a resposta bruta do LLM, e se houve algum problema de parsing. O Postgres só
     guarda o resumo; o Phoenix mostra a visão agregada.</p></details>
   </div>
@@ -148,15 +148,15 @@ Phoenix: lê dos dois e cria dashboard visual</code></pre>
     ferramentas usa?</div>
     <details><summary>Resposta</summary>
     <p><strong>Postgres</strong> para comparar métricas agregadas (taxa de acerto por
-    versão). <strong>Phoenix</strong> para comparar traces lado-a-lado do mesmo ticket.
-    <strong>LangSmith</strong> para inspecionar cada chamada LLM individualmente.</p></details>
+    versão). <strong>Phoenix</strong> para comparar traces lado-a-lado do mesmo ticket
+    (é o raio-X de cada chamada LLM individualmente).</p></details>
   </div>
 
   <p><strong>Tem dúvidas?</strong> Pergunte ao agente.</p>
 
   <p class="small"><em>Fontes primárias:
-  <a href="https://docs.smith.langchain.com/">LangSmith Docs</a> ·
   <a href="https://docs.arize.com/phoenix">Phoenix Docs</a> ·
-  <a href="https://www.postgresql.org/docs/current/">PostgreSQL Docs</a></em></p>
+  <a href="https://www.postgresql.org/docs/current/">PostgreSQL Docs</a> ·
+  <a href="https://docs.docker.com/compose/">Docker Compose Docs</a></em></p>
 </body>
 </html>

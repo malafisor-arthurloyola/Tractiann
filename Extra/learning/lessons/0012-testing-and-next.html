@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L12 — Testes, Split Treino/Teste e o que Falta</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0011-docker-postgres.html">L11</a> ·
+    <strong>L12 — Testes e Futuro</strong>
+  </header>
+
+  <h1>L12 — Testes Automatizados, Split Treino/Teste e o que Falta</h1>
+
+  <p>Agora que o agente <strong>funciona</strong> (de verdade), como garantimos
+  que ele <strong>continua funcionando</strong> depois de cada mudança? E como
+  medimos se ele <strong>melhorou</strong> ou <strong>piorou</strong>?</p>
+
+  <h2>1. Estratégia de Teste (71 testes no total)</h2>
+
+  <table>
+    <tr><th>Camada</th><th>Arquivo</th><th>O que testa</th><th>Velocidade</th></tr>
+    <tr>
+      <td><span class="badge blue">API</span></td>
+      <td><code>api/tests/test_api.py</code></td>
+      <td>Envelopes, modos, permissões, seeds, 404s</td>
+      <td>~2s</td>
+    </tr>
+    <tr>
+      <td><span class="badge blue">Agente</span></td>
+      <td><code>tests/test_agent.py</code></td>
+      <td>Rotas do grafo, quality_check, ações, cache, extract helpers</td>
+      <td>~2.5s</td>
+    </tr>
+    <tr>
+      <td><span class="badge blue">Avaliação</span></td>
+      <td><code>eval/runner.py</code></td>
+      <td>Trajetória vs gabarito (determinístico) + juiz LLM (subjetivo)</td>
+      <td>~10s/ticket</td>
+    </tr>
+  </table>
+
+  <h3>O que os 32 testes do agente cobrem</h3>
+  <pre><code>TestRouteAfterQuality (6 testes):
+  - ok/partial/unavailable → decide
+  - incomplete+next_tool → investigate
+  - incomplete sem next_tool → decide
+  - retry budget excedido → decide
+
+TestRouteAfterDecide (3 testes):
+  - orient → respond
+  - act → act
+  - escalate → escalate
+
+TestQualityCheck (5 testes):
+  - Todas complete → ok
+  - baseline unavailable → unavailable
+  - analyses vazia → incomplete
+  - rms partial → partial
+  - Sugere backup tool
+
+TestExtractAction (4 testes):
+  - reprocess/specialist/retrain/config por keyword
+
+TestBuildActionUrl (5 testes):
+  - Mapeamento correto dos 5 endpoints
+
+TestCacheKey (3 testes):
+  - Mesma versão → mesma chave
+  - Contexto diferente → chave diferente
+  - Versão diferente → chave diferente (invalidação)
+
+TestExtractHelpers (3 testes):
+  - analyses list, first analysis id, empty
+
+TestStateFields (2 testes):
+  - action_type e action_target existem
+  - tools_called existe</code></pre>
+
+  <h2>2. Split Treino/Teste (como em ML)</h2>
+  <p>Nós separamos os 17 tickets em dois grupos:</p>
+
+  <table>
+    <tr><th>Split</th><th>Tickets</th><th>Uso</th></tr>
+    <tr>
+      <td><strong>Treino</strong></td>
+      <td>13 tickets (INV-04,05,06,07,09,10,11, EXE-12,13,15,16, CTX-01,03)</td>
+      <td>Desenvolvimento e ajuste do agente</td>
+    </tr>
+    <tr>
+      <td><strong>Teste (held-out)</strong></td>
+      <td>4 tickets (INV-08, 11b, EXE-14, CTX-02)</td>
+      <td>Avaliação final de generalização</td>
+    </tr>
+  </table>
+
+  <pre><code># Roda avaliação só no treino (desenvolvimento)
+make eval
+
+# Roda o teste final (held-out) — só na hora da "prova"
+make prova-final
+
+# Roda tudo (treino + teste)
+api\.venv\Scripts\python.exe -m eval.runner --split all</code></pre>
+
+  <div class="tip">
+    <strong>Regra de ouro:</strong> Nunca ajuste o agente olhando os 4 tickets
+    de teste. Eles são a prova final — se você sintonizar neles, perde a capacidade
+    de medir generalização.
+  </div>
+
+  <h2>3. O que NÃO está implementado (e precisa ser feito)</h2>
+
+  <h3>🔴 Streamlit UI</h3>
+  <p>Não existe nenhum arquivo <code>app.py</code>. O backend (grafo + HITL) está
+  pronto pra ser chamado — só falta a "tela". A interface precisa de:
+  <ul>
+    <li>Dropdown de tickets (lê <code>cases.json</code>)</li>
+    <li>Botão "Executar" (chama <code>run_graph()</code>)</li>
+    <li>Cards de resultado (quality, gaps, decision, trace)</li>
+    <li>Botões HITL (Confirmar/Cancelar) quando <code>decision=act</code></li>
+  </ul></p>
+
+  <h3>🟡 Integração End-to-End</h3>
+  <p>Os testes atuais testam componentes isoladamente. Falta um teste que
+  rode o agente + API + Postgres juntos, verificando que a execução foi
+  registrada no log.</p>
+
+  <h3>🟢 Phoenix como observability em produção</h3>
+  <p>Hoje o Phoenix está <code>PHOENIX_ENABLED=0</code> (desativado). Para produção,
+  ative e rode o Phoenix em Docker para capturar traces automaticamente.</p>
+
+  <h2>4. Mapa Completo do Sistema Hoje</h2>
+
+  <pre><code>                         ┌─────────────────┐
+                         │  cases.json     │  ← 17 tickets
+                         │  (input)        │
+                         └────────┬────────┘
+                                  │
+                         ┌────────▼────────┐
+                         │  eval/runner.py │  ← avaliação
+                         │  (split, judge) │
+                         └────────┬────────┘
+                                  │
+                    ┌─────────────▼──────────────┐
+                    │     LangGraph (grafo)       │
+                    │                             │
+                    │  investigate → quality_check │
+                    │         ↕ (retry)           │
+                    │       decide → act/escalate  │
+                    │         │       │           │
+                    │    interrupt  tractian_request│
+                    │    (HITL)    (POST/PATCH)   │
+                    └─────┬───────┬───────────────┘
+                          │       │
+               ┌──────────▼─┐   ┌─▼─────────────────┐
+               │  Postgres   │   │  API Industrial   │
+               │  (logs)     │   │  (FastAPI :8000)  │
+               └─────────────┘   └──────────────────┘
+                          │
+               ┌──────────▼──┐
+               │  Phoenix    │  ← tracing (Otel)
+               │  (dashboard)│
+               └─────────────┘</code></pre>
+
+  <h2>Teste seu entendimento</h2>
+
+  <div class="qa">
+    <div class="q">Pergunta 1</div>
+    <div class="a">Por que o split treino/teste é importante para avaliação honesta?</div>
+    <details><summary>Resposta</summary>
+    <p>Se você desenvolve e avalia no mesmo conjunto, está medindo
+    <strong>memorização</strong> (overfitting), não <strong>generalização</strong>.
+    O teste held-out simula tickets que o agente nunca viu — é a única forma
+    honesta de saber se ele funciona de verdade.</p></details>
+  </div>
+
+  <div class="qa">
+    <div class="q">Pergunta 2</div>
+    <div class="a">Se você rodar <code>make eval</code> 10 vezes, os resultados
+    serão idênticos? Por quê?</div>
+    <details><summary>Resposta</summary>
+    <p>Não. O LLM é estocástico (temperature=0.3). Cada chamada pode gerar
+    uma resposta diferente. Por isso a métrica de <strong>consistência</strong>
+    existe — e por isso o cache é importante (evita re-execuções).</p></details>
+  </div>
+
+  <p><strong>Tem dúvidas?</strong> Pergunte ao agente.</p>
+
+  <p class="small"><em>Fontes primárias:
+  <code>tests/test_agent.py</code> ·
+  <code>eval/runner.py</code> ·
+  <code>eval/split.json</code></em></p>
+</body>
+</html>

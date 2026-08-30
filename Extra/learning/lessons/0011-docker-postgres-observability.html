@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L11 — Docker, Postgres e Observabilidade</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0010-graph-fixes.html">L10</a> ·
+    <strong>L11 — Infraestrutura</strong> ·
+    <a href="0012-testing-and-next.html">L12</a>
+  </header>
+
+  <h1>L11 — Docker, Postgres e Observabilidade</h1>
+
+  <p>O agente não precisa só de um bom <code>brain</code> (o LLM). Ele precisa de
+  um bom <strong>sistema nervoso</strong>: como registrar o que feu, comparar desempenho
+  entre versões, e ter um historial para debug. É aí que entram o <strong>Docker</strong>,
+  o <strong>Postgres</strong> e o <strong>Phoenix</strong>.</p>
+
+  <h2>Docker: O Container do Agente</h2>
+  <p>Docker encapsula serviços como Postgres e Phoenix em ambientes isolados.
+  No nosso projeto, o <code>docker-compose.yml</code> define dois serviços:</p>
+  <pre><code>services:
+  postgres-agent:
+    image: postgres:16-alpine
+    container_name: tractian-agent-postgres
+    environment:
+      POSTGRES_USER: tractian
+      POSTGRES_PASSWORD: tractian_dev
+      POSTGRES_DB: tractian_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: tractian-agent-phoenix
+    ports:
+      - "6006:6006"</code></pre>
+
+  <h3>Como Rodar</h3>
+  <pre><code># Sobe Postgres e Phoenix em background
+make up
+
+# Inicializa a tabela execucoes no Postgres
+make postgres-init
+
+# Acessa o Phoenix (dashboard de tracing) em http://localhost:6006
+make phoenix-up</code></pre>
+
+  <h2>Postgres: O Diário do Agente</h2>
+  <p>O Postgres salva cada execução relevante do agente. Isso permite comparar
+  versões (v1 vs v2) e entender padrões (qual motivo de escalonamento é mais comum?).</p>
+
+  <h3>Schema da Tabela execucoes</h3>
+  <pre><code>CREATE TABLE IF NOT EXISTS execucoes (
+    id              SERIAL PRIMARY KEY,
+    ticket_id       TEXT NOT NULL,
+    agent_version   TEXT NOT NULL DEFAULT 'v1',
+    user_id         TEXT,
+    asset_id        TEXT,
+    decision        TEXT,           -- 'orient' | 'act' | 'escalate'
+    quality_verdict TEXT,           -- 'ok' | 'partial' | 'incomplete' | 'unavailable'
+    data_gaps       JSONB,          -- o que faltou
+    trace           JSONB,          -- chamadas a API + justificativas
+    response        TEXT,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);</code></pre>
+
+  <h3>Comparando Versoes</h3>
+  <p>A funcao chave e <code>compare_versions(v1, v2)</code> em <code>agent/logging/postgres.py</code>.
+  Ela executa uma query que cruza as decisoes de cada versao:</p>
+  <pre><code>SELECT * FROM (
+    SELECT
+        COALESCE(a.decision, b.decision) AS decision,
+        COALESCE(a.quality_verdict, b.quality_verdict) AS quality_verdict,
+        COALESCE(a.n, 0) AS v_a,
+        COALESCE(b.n, 0) AS v_b
+    FROM (SELECT decision, quality_verdict, COUNT(*) n FROM execucoes
+          WHERE agent_version = 'v1' GROUP BY decision, quality_verdict) a
+    FULL OUTER JOIN (SELECT decision, quality_verdict, COUNT(*) n FROM execucoes
+          WHERE agent_version = 'v2' GROUP BY decision, quality_verdict) b
+      ON a.decision = b.decision AND a.quality_verdict = b.quality_verdict
+) t
+ORDER BY v_a + v_b DESC;</code></pre>
+
+  <p>Isso gera uma tabela comparativa que voce pode ver no terminal via
+  <code>make compare v1 v2</code>.</p>
+
+  <h2>Phoenix: O Raio-X do LLM</h2>
+  <p>Enquanto o Postgres guarda o <strong>resumo</strong>, o Phoenix (Arize) guarda
+  cada <strong>chamada ao LLM</strong>: o prompt enviado, a resposta recebida, tokens
+  e latencia. E gratuito e open-source (usamos em vez do LangSmith pago).</p>
+
+  <h3>Como Funciona?</h3>
+  <ul>
+    <li>O agente usa <code>opentelemetry</code> para enviar spans para o Phoenix.</li>
+    <li>O Phoenix roda em Docker e visualiza esses traces em um dashboard web.</li>
+    <li>Quando <code>PHOENIX_ENABLED=1</code> no <code>.env</code>, cada chamada ao LLM
+    e registrada automaticamente via <code>LangChainInstrumentor</code>.</li>
+  </ul>
+
+  <div class="tip">
+    <strong>Dica:</strong> Para ver o que o LLM realmente pensou (e por que ele errou),
+    abra o Phoenix, encontre o trace do ticket problemático, e inspecione o prompt completo.
+  </div>
+
+  <h2>Teste seu entendimento</h2>
+
+  <div class="qa">
+    <div class="q">Pergunta 1</div>
+    <div class="a">Por que usamos <code>MEMORYSAVER</code> em vez de <code>PGCHECKPOINTER</code> para o grafo?</div>
+    <details><summary>Resposta</summary>
+    <p><code>MemorySaver</code> e mais simples e ideal para desenvolvimento/testes.
+    Ele guarda o estado na memoria do processo. Para producao, onde multiplos
+    processos ou reinicios aconteceriam, usariamos o Postgres como checkpointer
+    para garantir que o estado de uma interrupcao (HITL) persista.</p></details>
+  </div>
+
+  <div class="qa">
+    <div class="q">Pergunta 2</div>
+    <div class="a">O que acontece se o Postgres nao estiver rodando?</div>
+    <details><summary>Resposta</summary>
+    <p>O logger (<code>log_execution</code>) retorna <code>False</code> silenciosamente.
+    O agente continua funcionando normalmente, mas nenhuma execucao sera registrada
+    no historico. E um degrade-safe.</p></details>
+  </div>
+
+  <p><strong>Tem duvidas?</strong> Pergunte ao agente.</p>
+
+  <p class="small"><em>Fontes primarias:
+  <code>docker-compose.yml</code> ·
+  <code>agent/logging/postgres.py</code> ·
+  <code>agent/logging/phoenix.py</code> ·
+  <a href="https://docs.docker.com/compose/">Docker Compose Docs</a></em></p>
+</body>
+</html>

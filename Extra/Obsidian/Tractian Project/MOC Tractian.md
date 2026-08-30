@@ -27,3 +27,10 @@ aliases: [Mapa de Conteúdo, Índice do Projeto, MOC]
 - [[Avaliação do Agente]]
 - [[Observabilidade Postgres LangSmith Phoenix]]
 - [[Streamlit Interface]]
+
+## 🛠️ Implementação e Correções
+- [[Auditoria e Bugs Críticos]]
+- [[Correções no Grafo HITL Cache]]
+- [[Docker Postgres Observabilidade Detalhes]]
+- [[Testes Automatizados e Próximos Passos]]
+- [[Ações Reais no Nó Act]]

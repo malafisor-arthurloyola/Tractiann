@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L10 — Correções nos Grafos e Fluxo HITL</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0009-audit-overview.html">L9</a> ·
+    <strong>L10 — Grafos HITL</strong> ·
+    <a href="0011-docker-postgres.html">L11</a>
+  </header>
+
+  <h1>L10 — Correções nos Grafos, Cache e Fluxo HITL</h1>
+
+  <p>Essa lição mergulha nas correções mais importantes que fizemos no código
+  do agente: como o grafo rota, como o cache invalida, e como o HITL
+  (Human-in-the-loop) funciona na prática.</p>
+
+  <h2>1. Roteamento do Grafo (route_after_quality)</h2>
+  <p>Antes da correção, o <code>unavailable</code> pule direto para <code>escalate</code>,
+  pulando o <code>decide</code>. Isso resultava em <code>decision=None</code>.</p>
+
+  <pre><code># ANTES (bug):
+if verdict == "unavailable":
+    return "escalate"  # ← decide NUNCA roda, decision=None
+
+# DEPOIS (corrigido):
+if verdict == "unavailable":
+    return "decide"    # ← decide RODA e define decision="escalate"</code></pre>
+
+  <p>Agora, todos os verdictos (<code>ok</code>, <code>partial</code>, <code>incomplete</code>,
+  <code>unavailable</code>) passam pelo <code>decide</code>. A decisão é sempre tomada
+  com base nos dados e gaps registrados.</p>
+
+  <h2>2. O Bug do tools_called Merge</h2>
+  <p>O state <code>tools_called</code> usa <code>Annotated[list, operator.add]</code>,
+  o que significa que cada retorna <strong>appenda</strong> à lista existente.</p>
+
+  <pre><code># ANTES (bug):
+def investigate(state):
+    tools_called = list(state.get("tools_called") or [])
+    for tool in CORE_TOOLS:
+        ...
+        tools_called.append(tool)
+    return {"tools_called": tools_called}  # ← retorna a LISTA INTEIRA
+    # operator.add: [5]+[5]+[5] = 15 entries duplicados!
+
+# DEPOIS (corrigido):
+def investigate(state):
+    new_tools = []
+    for tool in CORE_TOOLS:
+        ...
+        new_tools.append(tool)
+    return {"tools_called": new_tools}  # ← retorna SÓ OS NOVOS
+    # operator.add: [5]+[1] = 6 entries corretos</code></pre>
+
+  <h2>3. Cache com Invalidação</h2>
+  <p>O cache de decisões do LLM (para evitar re-execuções gastando token)
+  agora inclui a <code>AGENT_VERSION</code> no hash. Quando você muda o prompt
+  ou a política, basta bumpar a versão em <code>agent/version.py</code>.</p>
+
+  <pre><code># Em agent/version.py:
+AGENT_VERSION = "v2"  # ← bump manual a cada mudança relevante
+
+# Em agent/nodes.py (_cache_key):
+def _cache_key(context_text):
+    payload = f"{AGENT_VERSION}:{context_text}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()</code></pre>
+
+  <p>Isso garante que re-execuções do mesmo ticket sempre usem o cache,
+  mas mudanças de comportamento forçam uma nova chamada ao LLM.</p>
+
+  <h2>4. Nó act com Ações Reais (POST/PATCH)</h2>
+  <p>O nó <code>act</code> agora realmente <strong>executa</strong> a ação
+  na API industrial. O fluxo é:</p>
+
+  <ol>
+    <li><code>interrupt()</code> — pausa o grafo, salva o estado (HITL).</li>
+    <li>Humano confirma ou cancela (via Streamlit).</li>
+    <li>Se confirmado, o agente chama o endpoint correto via <code>tractian_request</code>.</li>
+    <li>Retorna o resultado da API no trace.</li>
+  </ol>
+
+  <h3>Os 4 tipos de ação suportados</h3>
+  <table>
+    <tr><th>Tipo</th><th>Endpoint</th><th>Permissão</th></tr>
+    <tr><td><code>reprocess</code></td><td>POST /analyses/{id}/reprocess</td><td>action_low</td></tr>
+    <tr><td><code>specialist</code></td><td>POST /analyses/{id}/request-specialist</td><td>action_low</td></tr>
+    <tr><td><code>retrain</code></td><td>POST /models/{id}/request-retraining</td><td>action_high</td></tr>
+    <tr><td><code>update_config</code></td><td>PATCH /assets/{id}</td><td>action_high</td></tr>
+  </table>
+
+  <h3>Como a ação é determinada</h3>
+  <p>A helper <code>_extract_action()</code> analisa o texto do LLM e mapeia
+  por palavras-chave:</p>
+  <pre><code>"reprocessar" → reprocess
+"especialista" → specialist
+"retreinamento" → retrain
+"config"/"criticidade" → update_config</code></pre>
+
+  <p>O <code>action_target</code> (ID do alvo) é extraído dos dados coletados
+  (primeira análise disponível, modelo, ou o próprio ativo).</p>
+
+  <h2>5. Estrutura do AgentState</h2>
+  <p>O estado do grafo agora inclui campos de ação:</p>
+
+  <pre><code>class AgentState(TypedDict):
+    # --- Entrada ---
+    ticket_id: str
+    case_id: str
+    company_id: str
+    user_id: str
+    asset_id: str
+    message: str
+
+    # --- Contexto coletado ---
+    raw: dict[str, dict]      # envelops brutos por categoria
+    quality_verdict: Literal["ok", "partial", "incomplete", "unavailable"] | None
+    data_gaps: Annotated[dict, operator.or_]
+    next_tool: str | None
+    tools_called: Annotated[list[str], operator.add]  # ← appenda
+
+    # --- Decisão ---
+    decision: Literal["orient", "act", "escalate"] | None
+    decision_justification: str | None
+    action_type: Literal["reprocess", "specialist", "retrain", "update_config"] | None
+    action_target: str | None
+
+    # --- Resultado ---
+    response: str | None
+    trace: Annotated[list[dict], operator.add]</code></pre>
+
+  <h2>Teste seu entendimento</h2>
+
+  <div class="qa">
+    <div class="q">Pergunta 1</div>
+    <div class="a">O que acontece se o humano cancelar no HITL?</div>
+    <details><summary>Resposta</summary>
+    <p>O nó <code>act</code> retorna <code>decision="escalate"</code> e
+    <code>decision_justification</code> indica que a ação foi cancelada.
+    O trace registra <code>"cancelled_by_human"</code>.</p></details>
+  </div>
+
+  <div class="qa">
+    <div class="q">Pergunta 2</div>
+    <div class="a">Por que o <code>operator.add</code> no <code>tools_called</code>
+    causa duplicatas?</div>
+    <details><summary>Resposta</summary>
+    <p><code>operator.add</code> concatena listas. Se o nó <code>investigate</code>
+    retorna a lista inteira (5 tools) em cada passada, e o state já tem 5,
+    o resultado é 5+5=10. Na verdade deveria ser 5+1=6.</p></details>
+  </div>
+
+  <p><strong>Tem dúvidas?</strong> Pergunte ao agente.</p>
+
+  <p class="small"><em>Fontes primárias:
+  <code>agent/graph/nodes.py</code> ·
+  <code>agent/graph/state.py</code> ·
+  <code>agent/graph/agent.py</code></em></p>
+</body>
+</html>

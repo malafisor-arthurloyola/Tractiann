@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L9 — Auditoria de Arquitetura: O Que Estava Quebrado</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <a href="../MISSION.md">Missão</a> ·
+    <a href="0008-streamlit.html">L8</a> ·
+    <strong>L9 — Auditoria</strong> ·
+    <a href="0010-graph-internals.html">L10</a>
+  </header>
+
+  <h1>L9 — Auditoria de Arquitetura: O Que Estava Quebrado</h1>
+
+  <p>Depois que o agente passou a funcionar, fizemos uma auditoria completa.
+  O resultado foi humilde: tinha <strong>bugs críticos</strong> escondidos por trás
+  de uma aparência de "funcionando". Essa lição conta o que encontramos e como corrigimos.</p>
+
+  <h2>O que parecia funcionar</h2>
+  <ul>
+    <li>O grafo compilava e rodava</li>
+    <li>Tickets geravam respostas</li>
+    <li>39 testes da API passavam</li>
+    <li>Decisões apareciam no output</li>
+  </ul>
+
+  <h2>O que realmente estava quebrado</h2>
+
+  <div class="card">
+    <h3>🔴 CRÍTICO 1: "Ação" era mentira</h3>
+    <p>O nó <code>act</code> fazia só <code>interrupt()</code> e retornava um trace entry.
+    <strong>Nunca chamava a API</strong> (POST/PATCH). O agente dizia "AGIR" mas não fazia nada.</p>
+    <p><strong>Depois:</strong> O nó agora executa POST/PATCH real na API
+    (reprocess, specialist, retrain, update_config).</p>
+  </div>
+
+  <div class="card">
+    <h3>🔴 CRÍTICO 2: decision=None para unavailable</h3>
+    <p>O <code>route_after_quality</code> mandava <code>unavailable</code> direto
+    para <code>escalate</code>, <strong>pulando o nó <code>decide</code></strong>.
+    Resultado: <code>decision=None</code> em todos os unavailable.</p>
+    <p><strong>Depois:</strong> unavailable agora vai para <code>decide</code>,
+    que define <code>decision="escalate"</code> com justificativa.</p>
+  </div>
+
+  <div class="card">
+    <h3>🟡 ALTO: Cache nunca invalidava</h3>
+    <p>O hash do cache era só do contexto. Trocou o prompt? O cache antigo continuava valendo.</p>
+    <p><strong>Depois:</strong> A chave inclui <code>AGENT_VERSION</code>.
+    Mudar a versão invalida o cache automaticamente.</p>
+  </div>
+
+  <div class="card">
+    <h3>🟡 ALTO: tools_called duplicava entries</h3>
+    <p>O nó <code>investigate</code> retornava a lista inteira. O state usa
+    <code>operator.add</code> que appenda. Resultado: duplicatas
+    e budget de retry estourava cedo.</p>
+    <p><strong>Depois:</strong> <code>investigate</code> retorna só os NOVOS tools
+    daquela passada. O <code>operator.add</code> concatena corretamente.</p>
+  </div>
+
+  <div class="card">
+    <h3>🟡 ALTO: Trajectory assertions incompletas</h3>
+    <p>Só contavam 5 GET categories (baseline/analyses/rms/spectrum/data_quality).
+    Não detectavam knowledge, models, asset_info, nem ações POST.</p>
+    <p><strong>Depois:</strong> Cobertura expandida para knowledge, models, asset_info.</p>
+  </div>
+
+  <div class="card">
+    <h3>🟢 MÉDIO: Código morto e dependências faltando</h3>
+    <p><code>agent/tools.py</code> antigo conflitava com <code>agent/tools/</code> package.
+    <code>pyproject.toml</code> não existia (clone limpo = import error).
+    <code>is_within_trace()</code> nunca chamado. 5 campos no state nunca escritos.</p>
+    <p><strong>Depois:</strong> Código morto removido. pyproject.toml criado.
+    State limpo.</p>
+  </div>
+
+  <h2>O processo de auditoria</h2>
+  <pre><code>1. Li TODOS os arquivos-chave (agent/, eval/, api/)
+2. Rodei o agente em cada cenário e comparei com gabarito
+3. Tracei cada chamada HTTP/LLM pra ver onde quebrava
+4. Fiz a lista de bugs por severidade
+5. Criei branch feature/fix-critical-issues
+6. Corrigi em ordem de severidade
+7. Testei cada fix com testes unitários + runtime
+8. Merge na main quando tudo passou</code></pre>
+
+  <h2>Teste seu entendimento</h2>
+
+  <div class="qa">
+    <div class="q">Pergunta 1</div>
+    <div class="a">Por que o bug <code>decision=None</code> era perigoso?</div>
+    <details><summary>Resposta</summary>
+    <p>Porque o avaliador (trajectory assertion) verificava se <code>decision</code>
+    era igual ao gabarito. Quando era <code>None</code>, sempre falhava — mesmo que o
+    agente tivesse tomado a decisão correta no <code>decide</code> (que pulava).</p></details>
+  </div>
+
+  <div class="qa">
+    <div class="q">Pergunta 2</div>
+    <div class="a">Por que cache sem invalidação é um problema para avaliação?</div>
+    <details><summary>Resposta</summary>
+    <p>Se você muda o prompt e roda a avaliação, o cache retorna decisões
+    <strong>do prompt antigo</strong>. A avaliação mede o comportamento antigo,
+    não o novo. Você pensa que melhorou mas não melhorou.</p></details>
+  </div>
+
+  <p><strong>Tem dúvidas?</strong> Pergunte ao agente.</p>
+
+  <p class="small"><em>Fontes primárias:
+  <code>agent/graph/nodes.py</code> ·
+  <code>agent/graph/agent.py</code> ·
+  <code>eval/assertions/trajectory.py</code></em></p>
+</body>
+</html>
