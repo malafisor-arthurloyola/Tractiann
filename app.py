@@ -551,12 +551,91 @@ def render_ticket_card(case: Dict[str, Any]):
     """, unsafe_allow_html=True)
 
 
+def render_handoff_support_ticket(case: Dict[str, Any], result: Dict[str, Any]):
+    """Renderiza um Painel de Chamado de Suporte / Handoff estilo Zendesk/ServiceNow."""
+    decision = result.get("decision")
+    if decision != "escalate":
+        return
+
+    gaps = result.get("data_gaps") or result.get("gaps") or {}
+    gaps_str = ", ".join(gaps.keys()) if isinstance(gaps, dict) and gaps else "Dados críticos não confirmados"
+    raw = result.get("raw", {})
+    ticket_id = case.get("ticket_id", "TKT-UNKNOWN")
+    assigned_key = f"assigned_tech_{ticket_id}"
+
+    st.markdown(f"""
+    <div style="background:#181b24; border:1px solid #dc2626; border-left:6px solid #ef4444; border-radius:10px; padding:20px; margin-bottom:18px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #2d3142; padding-bottom:12px; margin-bottom:14px;">
+            <div>
+                <span style="background:#3d1f1f; color:#f87171; font-weight:700; font-size:11px; padding:4px 10px; border-radius:14px; border:1px solid #7f1d1d; margin-right:8px;">
+                    🎫 CHAMADO DE SUPORTE ESCALADO
+                </span>
+                <span style="font-size:15px; font-weight:700; color:#fff;">{ticket_id}</span>
+            </div>
+            <div>
+                <span style="background:#2e2010; color:#f59e0b; font-weight:600; font-size:11px; padding:4px 10px; border-radius:14px; border:1px solid #78350f;">
+                    🟡 Aguardando Atendimento Humano
+                </span>
+            </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:10px; margin-bottom:14px; font-size:12px; color:#8892a0;">
+            <div><b>🏢 Cliente:</b> <span style="color:#e2e8f0;">{case.get('company_id','').replace('comp_','').replace('_',' ').title()}</span></div>
+            <div><b>⚙️ Ativo:</b> <span style="color:#60a5fa; font-weight:600;">{case.get('asset_id','')}</span></div>
+            <div><b>👤 Solicitante:</b> <span style="color:#c084fc;">{case.get('user_id','')}</span></div>
+            <div><b>⚠️ Motivo Bloqueio IA:</b> <span style="color:#fca5a5;">Lacunas Críticas ({gaps_str})</span></div>
+        </div>
+
+        <div style="background:#0f1117; border:1px solid #2d3142; border-radius:8px; padding:14px; margin-bottom:14px;">
+            <div style="font-size:12px; font-weight:700; color:#f87171; text-transform:uppercase; margin-bottom:6px;">
+                🛑 Por que o Agente não finalizou automaticamente?
+            </div>
+            <div style="font-size:13px; color:#e2e8f0; line-height:1.5;">
+                O agente coletou sinais preliminares, mas o estado do <b>Baseline</b> ou das <b>Análises</b> veio com inconsistência/indisponibilidade na API industrial. Na metodologia Tractian, limiares de vibração derivam do comportamento aprendido da máquina. Para evitar passar falsos diagnósticos ao cliente, o atendimento foi repassado para a engenharia de suporte.
+            </div>
+        </div>
+
+        <div style="background:#0f1117; border:1px solid #2d3142; border-radius:8px; padding:14px; margin-bottom:14px;">
+            <div style="font-size:12px; font-weight:700; color:#60a5fa; text-transform:uppercase; margin-bottom:6px;">
+                🛠️ Ações Recomendadas para o Engenheiro Humano:
+            </div>
+            <div style="font-size:13px; color:#cbd5e1; line-height:1.6;">
+                1. <b>Orientar o Cliente:</b> Explicar que o alarme é dinâmico (baseado no histórico da máquina) e não uma norma fixa genérica.<br/>
+                2. <b>Verificar Sensor:</b> Inspecionar se o sensor do ativo <code>{case.get('asset_id','')}</code> teve perda de sinal ou ruído.<br/>
+                3. <b>Recalibrar Baseline:</b> Validar se o baseline precisa ser restabelecido na plataforma após intervenção mecânica.
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Controles de Atribuição de Técnico
+    c1, c2, c3 = st.columns([2, 1.2, 1.8])
+    with c1:
+        tech_assigned = st.selectbox(
+            "Atribuir Técnico Responsável:",
+            options=[
+                "Eng. Carlos Silva (Especialista em Vibração e Preditiva)",
+                "Eng. Ana Souza (Suporte N3 & Diagnóstico de Ativos)",
+                "Eng. Rodrigo Lima (Engenharia de Conectividade e Sensores)",
+                "Eng. Juliana Costa (Especialista em Modelos e Baselines)",
+            ],
+            key=f"select_{assigned_key}",
+        )
+    with c2:
+        st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+        if st.button("📌 Assumir Chamado", key=f"btn_assign_{ticket_id}"):
+            st.session_state[assigned_key] = tech_assigned
+            st.success(f"✅ Chamado atribuído a {tech_assigned.split('(')[0].strip()}!")
+
+    if assigned_key in st.session_state:
+        st.info(f"👨‍🔧 **Chamado sob responsabilidade de:** `{st.session_state[assigned_key]}`")
+
+
 def render_result_cards(result: Dict[str, Any], elapsed: Optional[float] = None):
     """Renderiza os cards com métricas da decisão e telemetria da IA."""
     verdict = result.get("quality_verdict")
     decision = result.get("decision")
     gaps = result.get("data_gaps") or result.get("gaps") or {}
-    tools_called = result.get("tools_called", [])
     raw_keys = list(result.get("raw", {}).keys())
 
     gap_text = ", ".join(gaps.keys()) if isinstance(gaps, dict) and gaps else "Nenhuma"
@@ -587,7 +666,6 @@ def render_hitl_section(ticket_id: str, result: Dict[str, Any], is_interrupted: 
     hitl_confirmed = st.session_state.get(f"hitl_confirmed_{ticket_id}")
     hitl_cancelled = st.session_state.get(f"hitl_cancelled_{ticket_id}")
 
-    # 1. Se acabou de pausar no nó act aguardando confirmação humana
     if is_interrupted:
         interrupt_info = {}
         if "__interrupt__" in result and result["__interrupt__"]:
@@ -658,33 +736,20 @@ def render_hitl_section(ticket_id: str, result: Dict[str, Any], is_interrupted: 
 
 
 def render_response(result: Dict[str, Any], case: Dict[str, Any]):
-    """Exibe a resposta formatada do agente ou o dossiê de escalonamento para engenharia."""
+    """Exibe a resposta formatada do agente para o cliente."""
     decision = result.get("decision")
     response = result.get("response") or result.get("decision_justification") or ""
     if not response:
         return
 
-    if decision == "escalate":
-        st.markdown(f"""
-        <div class="tractian-card" style="border-left:4px solid #ef4444; background: linear-gradient(180deg, #1f1414, #181922);">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                <div style="font-size:12px; color:#f87171; font-weight:700; text-transform:uppercase; letter-spacing:1px;">
-                    📋 Dossiê de Escalonamento para Engenharia de Suporte Humano
-                </div>
-                <span class="tag tag-exe">INTERVENÇÃO HUMANA</span>
-            </div>
-            <div style="font-size:14px; line-height:1.7; color:#e2e8f0; white-space:pre-wrap;">{response}</div>
+    st.markdown(f"""
+    <div class="tractian-card" style="border-left:4px solid #ff6b35;">
+        <div style="font-size:11px; color:#8892a0; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">
+            Orientação Técnica / Resposta ao Cliente
         </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown(f"""
-        <div class="tractian-card" style="border-left:4px solid #ff6b35;">
-            <div style="font-size:11px; color:#8892a0; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">
-                Orientação / Resposta ao Cliente
-            </div>
-            <div style="font-size:14px; line-height:1.7; color:#e2e8f0; white-space:pre-wrap;">{response}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        <div style="font-size:14px; line-height:1.7; color:#e2e8f0; white-space:pre-wrap;">{response}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # ⚖️ Botão para avaliar a resposta deste ticket com o Juiz LLM sob demanda
     st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
@@ -717,10 +782,12 @@ def render_response(result: Dict[str, Any], case: Dict[str, Any]):
 
 
 def tab_diagnostico(case: Dict[str, Any], result: Optional[Dict[str, Any]], elapsed: Optional[float], is_interrupted: bool):
-    """Aba principal: ticket, métricas de resultado, HITL interativo e resposta."""
+    """Aba principal: ticket, Chamado de Suporte/Handoff, métricas de resultado, HITL e resposta."""
     render_ticket_card(case)
 
     if result:
+        # Se escalou para humano, renderiza o Chamado de Suporte Handoff com prioridade máxima
+        render_handoff_support_ticket(case, result)
         render_result_cards(result, elapsed)
         render_hitl_section(case["ticket_id"], result, is_interrupted)
         render_response(result, case)
@@ -728,148 +795,163 @@ def tab_diagnostico(case: Dict[str, Any], result: Optional[Dict[str, Any]], elap
         st.info("👈 Selecione um ticket na barra lateral e clique em **▶ Executar Agente** para ver o diagnóstico completo.")
 
 
-# ── Componentes de UI: Aba Trace & Sinais Técnicos (Pipeline Interativo) ─────
-def render_graph_pipeline_explorer(result: Dict[str, Any]):
-    """Explorador interativo de nós do LangGraph."""
+# ── Componentes de UI: Aba Trace & Grafo Visual Conectado ────────────────────
+def render_visual_connected_graph(result: Dict[str, Any]):
+    """Renderiza um fluxograma conectado de nós estilizado com cores de status dinâmicas."""
+    trace = result.get("trace", [])
+    raw = result.get("raw", {})
+    verdict = result.get("quality_verdict", "ok")
+    decision = result.get("decision", "orient")
+
+    # Mapeamento de cores de cada nó
+    # 1. Investigate: Verde se consultou, Vermelho se falhou tudo
+    inv_color = "#22c55e" if raw else "#ef4444"
+    inv_label = f"1. INVESTIGATE<br/>({len(raw)} tools consultadas)"
+
+    # 2. Quality Check: Verde se OK, Amarelo se Partial/Incomplete, Vermelho se Unavailable
+    qc_map = {"ok": ("#22c55e", "OK"), "partial": ("#f59e0b", "PARCIAL"), "incomplete": ("#f97316", "INCOMPLETO"), "unavailable": ("#ef4444", "INDISPONÍVEL")}
+    qc_color, qc_tag = qc_map.get(verdict, ("#6b7280", "—"))
+    qc_label = f"2. QUALITY_CHECK<br/>({qc_tag})"
+
+    # 3. Decide: Roxo normal ou Vermelho se forçado a escalar
+    dec_color = "#ef4444" if verdict == "unavailable" else "#8b5cf6"
+    dec_label = f"3. DECIDE<br/>(Decisão: {decision.upper()})"
+
+    # 4. Nó terminal
+    term_node = "respond" if decision == "orient" else ("act" if decision == "act" else "escalate")
+    term_color = "#22c55e" if decision == "orient" else ("#f59e0b" if decision == "act" else "#ef4444")
+    term_label = f"4. {term_node.upper()}<br/>({'Orientar' if decision=='orient' else ('Executar Ação' if decision=='act' else 'Handoff Humano')})"
+
+    st.markdown("#### 🗺️ Fluxograma Visual Conectado do LangGraph")
+    st.markdown(f"""
+    <div style="background:#0d0f16; border:1px solid #2d3142; border-radius:10px; padding:20px; margin-bottom:16px;">
+        <div style="display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:wrap;">
+            <!-- Nó 1 -->
+            <div style="background:#141d1a; border:2px solid {inv_color}; border-radius:8px; padding:12px 18px; text-align:center; min-width:140px; box-shadow:0 0 10px rgba(34,197,94,0.15);">
+                <div style="font-weight:700; color:{inv_color}; font-size:13px;">1. INVESTIGATE</div>
+                <div style="font-size:11px; color:#8892a0; margin-top:4px;">{len(raw)} tools consultadas</div>
+            </div>
+            <div style="color:#64748b; font-size:20px; font-weight:700;">➔</div>
+            <!-- Nó 2 -->
+            <div style="background:#1a1914; border:2px solid {qc_color}; border-radius:8px; padding:12px 18px; text-align:center; min-width:140px; box-shadow:0 0 10px rgba(245,158,11,0.15);">
+                <div style="font-weight:700; color:{qc_color}; font-size:13px;">2. QUALITY_CHECK</div>
+                <div style="font-size:11px; color:#8892a0; margin-top:4px;">Status: <b>{qc_tag}</b></div>
+            </div>
+            <div style="color:#64748b; font-size:20px; font-weight:700;">➔</div>
+            <!-- Nó 3 -->
+            <div style="background:#17141d; border:2px solid {dec_color}; border-radius:8px; padding:12px 18px; text-align:center; min-width:140px; box-shadow:0 0 10px rgba(139,92,246,0.15);">
+                <div style="font-weight:700; color:{dec_color}; font-size:13px;">3. DECIDE</div>
+                <div style="font-size:11px; color:#8892a0; margin-top:4px;">Deliberação: <b>{decision.upper()}</b></div>
+            </div>
+            <div style="color:#64748b; font-size:20px; font-weight:700;">➔</div>
+            <!-- Nó 4 -->
+            <div style="background:#1f1414; border:2px solid {term_color}; border-radius:8px; padding:12px 18px; text-align:center; min-width:140px; box-shadow:0 0 10px rgba(239,68,68,0.15);">
+                <div style="font-weight:700; color:{term_color}; font-size:13px;">4. {term_node.upper()}</div>
+                <div style="font-size:11px; color:#8892a0; margin-top:4px;">{'Orientação Final' if decision=='orient' else ('Confirmação HITL' if decision=='act' else 'Handoff para Humano')}</div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_node_gap_inspector(result: Dict[str, Any]):
+    """Inspetor interativo de nós para analisar gaps, erros e causas de bloqueio."""
     trace = result.get("trace", [])
     raw = result.get("raw", {})
     if not trace:
-        st.info("Nenhum trace de execução disponível.")
+        st.info("Nenhum dado de execução disponível.")
         return
 
-    st.markdown("#### 🧭 Pipeline de Execução do LangGraph (Clique para Inspecionar)")
+    st.markdown("#### 🔍 Inspetor de Detalhes & Gaps por Nó")
 
-    # Monta lista de passos para navegação em abas/pills
-    node_names = [f"{i+1}. {step.get('node', 'unknown').upper()}" for i, step in enumerate(trace)]
-    selected_node_idx = st.segmented_control("Nó Ativo", options=list(range(len(node_names))), format_func=lambda i: node_names[i], default=0)
+    node_options = [f"{i+1}. {step.get('node', 'unknown').upper()}" for i, step in enumerate(trace)]
+    selected_idx = st.segmented_control(
+        "Selecione um Nó para Inspecionar",
+        options=list(range(len(node_options))),
+        format_func=lambda i: node_options[i],
+        default=0,
+    )
 
-    if selected_node_idx is None:
-        selected_node_idx = 0
+    if selected_idx is None:
+        selected_idx = 0
 
-    curr_step = trace[selected_node_idx]
+    curr_step = trace[selected_idx]
     curr_node = curr_step.get("node", "unknown")
-
-    st.markdown(f"""
-    <div class="tractian-card" style="border-left:3px solid #60a5fa; margin-top:12px;">
-        <div style="font-size:16px; font-weight:700; color:#60a5fa; margin-bottom:8px;">
-            Nó: {curr_node.upper()}
-        </div>
-        <div style="font-size:13px; color:#e2e8f0; line-height:1.6;">
-    """, unsafe_allow_html=True)
 
     if curr_node == "investigate":
         tools = curr_step.get("tools_called", [])
-        st.markdown(f"**Função:** Consulta a API industrial Tractian através de ferramentas HTTP/MCP para o ativo.")
-        st.markdown(f"**Tools invocadas neste passo ({len(tools)}):** `{'`, `'.join(tools)}`")
-        st.markdown("**Envelopes coletados:**")
-        st.json({k: {"mode": v.get("mode"), "notes": v.get("notes")} for k, v in raw.items() if k in tools})
+        st.markdown(f"**Ferramentas consultadas nesta etapa:** `{', '.join(tools)}`")
+        
+        cols = st.columns(min(len(tools), 5) or 1)
+        for idx, tool_name in enumerate(tools):
+            env = raw.get(tool_name, {})
+            mode = env.get("mode", "unknown") if isinstance(env, dict) else "unknown"
+            mode_color = "#22c55e" if mode == "complete" else ("#f59e0b" if mode == "partial" else "#ef4444")
+            with cols[idx % len(cols)]:
+                st.markdown(f"""
+                <div style="background:#0f1117; border:1px solid #2d3142; border-radius:8px; padding:10px; text-align:center;">
+                    <div style="font-weight:700; color:#e2e8f0; font-size:12px;">{tool_name.upper()}</div>
+                    <div style="color:{mode_color}; font-size:11px; font-weight:600; margin-top:4px;">mode: {mode}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        with st.expander("📦 Ver Envelopes Brutos Coletados (JSON)"):
+            st.json({k: v for k, v in raw.items() if k in tools})
 
     elif curr_node == "quality_check":
         verdict = curr_step.get("verdict", "—")
         gaps = curr_step.get("gaps", {})
         next_t = curr_step.get("next_tool")
-        st.markdown(f"**Função:** Avalia a integridade e frescor de todas as respostas da API, detectando falhas probabilísticas.")
-        st.markdown(f"**Veredicto Definido:** `{verdict}` | **Próxima Tool Recomendada:** `{next_t or 'Nenhuma (Prosseguir para decisão)'}`")
-        st.markdown(f"**Lacunas Honestas Registradas (`data_gaps`):**")
-        st.json(gaps if gaps else {"status": "Nenhum gap detectado"})
+
+        st.markdown(f"**Veredicto da Qualidade:** `{verdict.upper()}` | **Próxima Ferramenta:** `{next_t or 'Nenhuma'}`")
+
+        if gaps:
+            st.markdown("<b>⚠️ Lacunas e Erros Identificados nos Sinais:</b>", unsafe_allow_html=True)
+            for cat, gap_list in gaps.items():
+                gap_desc = "; ".join(gap_list) if isinstance(gap_list, list) else str(gap_list)
+                st.markdown(f"""
+                <div style="background:#261814; border:1px solid #f97316; border-radius:8px; padding:10px 14px; margin-bottom:8px;">
+                    <div style="color:#fdba74; font-weight:700; font-size:12px;">❌ Lacuna na Categoria: {cat.upper()}</div>
+                    <div style="color:#fed7aa; font-size:12px; margin-top:2px;">{gap_desc}</div>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.success("✅ Nenhuma lacuna detectada. Todos os sinais técnicos vieram completos e consistentes.")
 
     elif curr_node == "decide":
         decision = curr_step.get("decision", "—")
-        reason = curr_step.get("reason", "análise de contexto")
         from_cache = curr_step.get("from_cache", False)
-        st.markdown(f"**Função:** Avalia o contexto completo + lacunas registradas para deliberar entre Orientar, Agir ou Escalar.")
-        st.markdown(f"**Decisão do Agente:** `{decision.upper()}` | **Origem:** {'⚡ Cache Local' if from_cache else '🧠 Inferência LLM'}")
-        st.markdown(f"**Raciocínio:** `{reason}`")
+        reason = curr_step.get("reason", "Análise contextual de evidências")
+        st.markdown(f"**Decisão Emitida:** `{decision.upper()}` | **Origem:** `{'⚡ Cache em Disco' if from_cache else '🧠 LLM Realtime'}`")
+        st.markdown(f"**Justificativa Técnica Interna:**")
+        st.code(result.get("decision_justification", "—"))
 
     elif curr_node == "act":
-        action = curr_step.get("action", "act")
         act_type = curr_step.get("action_type", "—")
         act_target = curr_step.get("action_target", "—")
         api_res = curr_step.get("api_result", "—")
-        st.markdown(f"**Função:** Executa mutação real (POST/PATCH) na API Tractian após confirmação humana.")
-        st.markdown(f"**Ação Solicitada:** `{act_type}` no alvo `{act_target}`")
-        st.markdown(f"**Resultado da API:** `{api_res}`")
+        st.markdown(f"**Ação de Impacto Disparada:** `{act_type}` no alvo `{act_target}`")
+        st.markdown(f"**Resposta da API Tractian:** `{api_res}`")
 
     elif curr_node in ("respond", "escalate"):
-        st.markdown(f"**Função:** Entrega final da orientação ou dossiê de escalonamento para o cliente/humano.")
-        st.markdown(f"**Saída Gerada:**")
+        st.markdown(f"**Saída do Atendimento ao Cliente / Engenharia:**")
         st.code(result.get("response", "—"))
-
-    st.markdown("</div></div>", unsafe_allow_html=True)
-
-
-def render_trace_timeline(result: Dict[str, Any]):
-    """Renderiza a timeline vertical clássica de nós do LangGraph."""
-    trace = result.get("trace", [])
-    if not trace:
-        st.info("Nenhum trace disponível.")
-        return
-
-    st.markdown("<h4 style='font-size:13px; color:#8892a0; text-transform:uppercase; letter-spacing:1px; margin-bottom:14px;'>Linha do Tempo de Nós Executados</h4>", unsafe_allow_html=True)
-
-    node_colors = {
-        "investigate": "#3b82f6",
-        "quality_check": "#f59e0b",
-        "decide": "#8b5cf6",
-        "respond": "#22c55e",
-        "act": "#ef4444",
-        "escalate": "#dc2626",
-    }
-
-    st.markdown('<div class="timeline-container"><div class="timeline-line"></div>', unsafe_allow_html=True)
-
-    for i, step in enumerate(trace, 1):
-        node = step.get("node", "unknown")
-        color = node_colors.get(node, "#6b7280")
-
-        desc_parts = []
-        if "tools_called" in step:
-            desc_parts.append(f"Tools consultadas: <code>{', '.join(step['tools_called'])}</code>")
-        if "verdict" in step:
-            desc_parts.append(f"Veredicto de qualidade: <b>{step['verdict']}</b>")
-        if "gaps" in step and step["gaps"]:
-            gaps = step["gaps"]
-            if isinstance(gaps, dict):
-                desc_parts.append(f"Gaps: <i>{', '.join(gaps.keys())}</i>")
-        if "decision" in step:
-            desc_parts.append(f"Decisão: <b>{step['decision'].upper()}</b>")
-        if "action" in step:
-            desc_parts.append(f"Ação: {step['action']}")
-        if "reason" in step:
-            desc_parts.append(f"Motivo: {step['reason']}")
-        if "from_cache" in step and step["from_cache"]:
-            desc_parts.append("⚡ <i>(Decisão recuperada de cache)</i>")
-
-        desc = " · ".join(desc_parts) or "—"
-
-        st.markdown(f"""
-        <div class="timeline-item">
-            <div class="timeline-dot" style="background:{color};"></div>
-            <div class="timeline-title" style="color:{color};">{i}. Nó: {node.upper()}</div>
-            <div class="timeline-desc">{desc}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def tab_trace(result: Optional[Dict[str, Any]]):
-    """Aba de visualização técnica de traces, sinais industriais e envelopes brutos."""
+    """Aba de visualização técnica com fluxograma visual conectado, inspetor de nós e sinais."""
     if not result:
         st.info("Nenhum resultado disponível. Execute um ticket na barra lateral primeiro.")
         return
 
-    render_graph_pipeline_explorer(result)
+    render_visual_connected_graph(result)
+    render_node_gap_inspector(result)
     st.markdown("<hr style='border-color:#2d3142; margin:20px 0;'>", unsafe_allow_html=True)
     render_trace_timeline(result)
     raw = result.get("raw", {})
     if raw:
         render_technical_signals(raw)
-        st.markdown("<h4 style='font-size:13px; color:#8892a0; text-transform:uppercase; letter-spacing:1px; margin:20px 0 10px 0;'>Envelopes Brutos da API</h4>", unsafe_allow_html=True)
-        for cat, env in raw.items():
-            mode = env.get("mode", "—") if isinstance(env, dict) else "—"
-            with st.expander(f"📦 {cat.upper()} (mode={mode})"):
-                st.json(env)
+
 
 
 def render_technical_signals(raw: Dict[str, Any]):
