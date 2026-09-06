@@ -289,6 +289,32 @@ afirma nem altera nada sem respaldo.
 > só apagaria essa distinção. Cada entrada de `eval/expected-paths-derivados.json` carrega
 > um campo `derivacao` explicando de que regra o rótulo saiu, para ser auditável.
 
+### Variância entre execuções idênticas
+
+Três rodadas do split de treino, mesmo código, mesma versão, `--no-cache` para forçar
+chamadas novas ao LLM.
+
+| rodada | acertos | conservadores | arriscados |
+| ---: | ---: | ---: | ---: |
+| 1 | 10/13 | 3 | **0** |
+| 2 | 9/13 | 4 | **0** |
+| 3 | 9/13 | 4 | **0** |
+
+**Média 9,33 · desvio 0,47 · amplitude de um caso.**
+
+O número a citar é **9,3 ± 0,5 de 13**. Isso resolve o que antes era ressalva: o salto de
+31% para 85% está muito acima do ruído; a diferença entre 77% e 85% (um caso, 7,7 pontos
+percentuais) está **exatamente dentro dele** e não deve ser afirmada.
+
+Mais revelador que a média: **12 dos 13 tickets deram a mesma decisão nas três rodadas.**
+A oscilação não está espalhada — está concentrada num único caso, o `TKT-EXE-15`
+(*"esse insight nunca acerta pro spindle, treina de novo"*), que alternou entre `act` e
+`orient`. É um ticket de fronteira: o cliente pede retreinamento, e a evidência sustenta
+tanto executar quanto explicar por que não vale a pena.
+
+E o achado central se sustenta numa amostra bem maior: **zero erros arriscados em 39
+decisões** (13 tickets × 3 rodadas).
+
 ### O mesmo agente, dois juízes
 
 Decisões congeladas por cache — **13 de 13 idênticas**. Só o avaliador mudou.
@@ -315,8 +341,9 @@ agregada esconde isso. Por isso os eixos são reportados separados.
 
 ## Limitações conhecidas
 
-- **Variância entre rodadas.** `temperature=0.3` produz oscilação de ~1 caso
-  (10–11/13). Os números são de rodada única, não média de N.
+- **Variância medida.** `temperature=0.3` produz oscilação de um caso, concentrada num
+  único ticket de fronteira. Três rodadas: 9,33 ± 0,47. Os números por versão nas seções
+  acima ainda são de rodada única — só a v7 foi replicada.
 - **Cota do provedor.** O Groq gratuito tem 200k tokens/dia — cerca de 3 rodadas
   completas com juiz. A cadeia de fallback (`LLM_FALLBACK_*`) mitiga.
 - **Split pequeno.** 13 tickets de treino: cada caso vale 7.7 pontos percentuais.

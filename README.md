@@ -17,8 +17,12 @@ O briefing original do parceiro está em [`STUDENT-GUIDE.md`](./STUDENT-GUIDE.md
 | teste *held-out* | parceiro | 3/4 — 75% | 1 | **0** |
 | cenários derivados | construídos aqui | 5/6 — 83% | 1 | **0** |
 
-**Zero erros arriscados em 23 tickets.** O agente erra — e erra sempre para o lado que não
-afirma nem altera nada sem respaldo.
+**Zero erros arriscados em 23 tickets** — e em 39 decisões, contando as três rodadas de
+replicação. O agente erra, e erra sempre para o lado que não afirma nem altera nada sem
+respaldo.
+
+A acurácia no treino, replicada três vezes, é **9,3 ± 0,5 de 13**. A oscilação está
+concentrada num único ticket de fronteira: 12 dos 13 dão a mesma decisão em todas as rodadas.
 
 A linha de base, medida antes de qualquer mudança, era **4 de 13 — 31%**, com dez dos treze
 tickets sendo escalados. A trajetória completa das sete versões está em
@@ -203,7 +207,8 @@ make test                                        # 39 testes da API industrial
 - **O 2×2 do juiz ficou incompleto.** Medimos dois juízes sobre o mesmo agente, mas isolar
   viés de autoavaliação com rigor exigiria também o modelo do juiz *escrevendo* e o outro
   julgando. Parte do delta pode ser diferença de calibração entre os modelos.
-- **`temperature=0.3`** produz oscilação entre execuções idênticas.
+- **`temperature=0.3`** produz oscilação de um caso entre execuções idênticas — medida em
+  três rodadas. As versões anteriores à v7 têm números de rodada única.
 - **O conjunto de teste foi consumido.** Qualquer ajuste feito olhando aqueles 4 tickets os
   transformaria em treino.
 
