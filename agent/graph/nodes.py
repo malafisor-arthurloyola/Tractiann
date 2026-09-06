@@ -447,6 +447,89 @@ A resposta é avaliada em quatro eixos. O que separa uma resposta boa de uma med
   sustenta — nem agir no escuro, nem escalar tendo a resposta em mãos."""
 
 
+def _resumir_rms(data: dict) -> dict:
+    """Condensa a série de RMS no que decide, em vez de 30 amostras cruas.
+
+    Duas razões. A primeira é custo: as amostras eram o maior bloco do prompt.
+    A segunda importa mais — pedir ao LLM que compare 30 números com um limiar é
+    pedir aritmética, justamente onde ele erra. O juiz flagrou o agente afirmando
+    "valores de vibração acima dos limites" num ticket em que isso não era
+    verdade. Aqui a comparação é feita em Python e entregue pronta.
+    """
+    amostras = [a for a in (data.get("samples") or []) if isinstance(a, dict)]
+    valores = [a["value"] for a in amostras if isinstance(a.get("value"), (int, float))]
+    limiar = data.get("alarm_threshold")
+
+    resumo = {
+        "unit": data.get("unit"),
+        "baseline_reference": data.get("baseline_reference"),
+        "baseline_state": data.get("baseline_state"),
+        "alarm_threshold": limiar,
+        "n_amostras": len(valores),
+    }
+    if not valores:
+        resumo["observacao"] = "sem amostras na série"
+        return resumo
+
+    primeiro, ultimo = valores[0], valores[-1]
+    resumo.update({
+        "primeiro": round(primeiro, 3),
+        "ultimo": round(ultimo, 3),
+        "minimo": round(min(valores), 3),
+        "maximo": round(max(valores), 3),
+        "variacao_pct": round((ultimo - primeiro) / primeiro * 100, 1) if primeiro else None,
+        "tendencia": "subindo" if ultimo > primeiro * 1.05
+                     else "caindo" if ultimo < primeiro * 0.95
+                     else "estavel",
+    })
+    if isinstance(limiar, (int, float)):
+        acima = [v for v in valores if v > limiar]
+        resumo["ultrapassou_limiar"] = bool(acima)
+        resumo["n_amostras_acima_do_limiar"] = len(acima)
+        resumo["ultimo_acima_do_limiar"] = ultimo > limiar
+    return resumo
+
+
+def _sem_nulos(data: dict) -> dict:
+    """Remove campos nulos — ruído que o modelo pode confundir com dado ausente."""
+    return {k: v for k, v in data.items() if v not in (None, [], {})}
+
+
+def _resumir_evidencia(categoria: str, data) -> object:
+    """Cura o payload de uma categoria para o balanço de evidência.
+
+    Entregar JSON cru convida o modelo a citar campos que não leu direito. Cada
+    categoria devolve só o que sustenta uma decisão.
+    """
+    if not isinstance(data, dict):
+        return data
+    if categoria == "rms":
+        return _resumir_rms(data)
+    if categoria == "spectrum":
+        # `peaks` já vem compacto e é o sinal: freq, amplitude e a nota (1x, 2x...).
+        return _sem_nulos({
+            "collected_at": data.get("collected_at"),
+            "peaks": data.get("peaks"),
+            "bands_missing": data.get("bands_missing"),
+        })
+    if categoria == "baseline":
+        return _sem_nulos({
+            k: data.get(k) for k in
+            ("state", "detection_mode", "learnable", "invalidation_reason", "features")
+        })
+    if categoria == "asset_info":
+        return _sem_nulos({
+            k: data.get(k) for k in
+            ("id", "machine_type", "criticality", "rotation_rpm", "sensor_status",
+             "bpfo_hz", "bpfi_hz", "bsf_hz", "ftf_hz", "line_frequency_hz", "points")
+        })
+    if categoria == "model":
+        return _sem_nulos({
+            k: data.get(k) for k in ("id", "version", "processing_state", "coverage")
+        })
+    return _sem_nulos(data)
+
+
 def _evidence_ledger(state: AgentState) -> str:
     """Monta o balanço de evidência que vai ao LLM.
 
@@ -475,7 +558,7 @@ def _evidence_ledger(state: AgentState) -> str:
             else:
                 parts.append(f"[{cat}] mode={mode} — nenhuma análise registrada")
         elif mode in USABLE_MODES:
-            parts.append(f"[{cat}] mode={mode} — {env.get('data')}")
+            parts.append(f"[{cat}] mode={mode} — {_resumir_evidencia(cat, env.get('data'))}")
         else:
             parts.append(f"[{cat}] mode={mode} — SEM DADO ({env.get('notes') or ''})")
 
