@@ -778,7 +778,20 @@ def act(state: AgentState) -> dict:
     action_target = state.get("action_target")
     user_id = state.get("user_id") or ""
 
-    # 1. Confirmação humana antes de qualquer mutação de impacto.
+    # 1. Sem alvo válido, não há o que confirmar. Esta checagem vem ANTES do
+    #    interrupt: chamar um humano para autorizar uma ação que o `_validate_action`
+    #    já anulou desperdiça a atenção dele — a tela mostraria "Alvo: None" e a
+    #    confirmação não executaria nada. O HITL existe para decisões de risco,
+    #    não para carimbar impossibilidades.
+    if not action_type or not action_target:
+        record_node("act.execution", **{"action.confirmed": False, "action.executed": False,
+                                        "action.skipped_reason": "sem alvo valido"})
+        return {
+            "trace": [{"node": "act", "action": "skipped", "confirmado": False,
+                       "reason": "nenhum alvo válido na evidência — ação não chegou ao humano"}],
+        }
+
+    # 2. Confirmação humana antes de qualquer mutação de impacto.
     confirmed = interrupt({
         "type": "action_confirmation",
         "decision": decision,
@@ -802,14 +815,7 @@ def act(state: AgentState) -> dict:
                        "action_type": action_type, "action_target": action_target}],
         }
 
-    if not action_type or not action_target:
-        record_node("act.execution", **{"action.confirmed": True, "action.executed": False})
-        return {
-            "trace": [{"node": "act", "action": "skipped",
-                       "reason": "action_type ou action_target ausente"}],
-        }
-
-    # 2. Executa a ação real, via tool MCP.
+    # 3. Executa a ação real, via tool MCP.
     tool, args = _build_action_call(action_type, action_target)
     if action_type == "update_config":
         # A única mutação que exige um corpo de mudanças além da justificativa.

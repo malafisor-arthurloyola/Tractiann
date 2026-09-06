@@ -1374,6 +1374,118 @@ def tab_metricas():
 
 
 # ── Componentes de UI: Aba Playground (Ticket Customizado) ───────────────────
+def _tickets_pendentes() -> list:
+    """Tickets pausados num interrupt() nesta sessão, aguardando decisão humana.
+
+    O grafo congela no `act` e o estado fica no checkpointer até alguém retomar —
+    pode ficar assim indefinidamente. Sem uma lista, o operador só descobre que
+    há um caso parado se voltar naquele ticket por acaso.
+    """
+    pendentes = []
+    for chave, valor in st.session_state.items():
+        if not (isinstance(chave, str) and chave.startswith("is_interrupted_") and valor):
+            continue
+        ticket_id = chave[len("is_interrupted_"):]
+        resultado = st.session_state.get(f"result_{ticket_id}") or {}
+        payload = {}
+        if "__interrupt__" in resultado and resultado["__interrupt__"]:
+            payload = resultado["__interrupt__"][0].value
+        pendentes.append({
+            "ticket_id": ticket_id,
+            "action_type": payload.get("action_type") or "—",
+            "action_target": payload.get("action_target") or "—",
+            "asset_id": payload.get("asset_id") or "—",
+            "gaps": len(payload.get("gaps") or {}),
+        })
+    return pendentes
+
+
+def _autonomia_do_conjunto(split: str) -> dict | None:
+    """Quantos tickets o agente resolveu sozinho e quantos exigiriam um humano.
+
+    `act` é a única decisão que passa por confirmação — mutação na plataforma da
+    Tractian. `orient` e `escalate` não escrevem nada e correm de ponta a ponta.
+    """
+    caminho = _caminho_resultados(split)
+    if not caminho.exists():
+        return None
+    dados = json.loads(caminho.read_text(encoding="utf-8"))
+    resultados = dados.get("results", [])
+    if not resultados:
+        return None
+    com_humano = [r for r in resultados if r.get("decision") == "act"]
+    return {
+        "total": len(resultados),
+        "autonomos": len(resultados) - len(com_humano),
+        "com_humano": len(com_humano),
+        "tickets": [r.get("ticket_id") for r in com_humano],
+    }
+
+
+def tab_notificacoes(cases: List[Dict[str, Any]]):
+    """Fila de aprovações pendentes e taxa de autonomia do agente."""
+    st.markdown("### Aprovações pendentes")
+
+    pendentes = _tickets_pendentes()
+    if pendentes:
+        st.warning(f"{len(pendentes)} ticket(s) aguardando decisão humana. "
+                   "O grafo está congelado neles até alguém confirmar ou cancelar.", icon="⚠️")
+        st.dataframe(
+            pd.DataFrame([{
+                "Ticket": p["ticket_id"],
+                "Ação solicitada": p["action_type"],
+                "Alvo": p["action_target"],
+                "Ativo": p["asset_id"],
+                "Lacunas de dado": p["gaps"],
+            } for p in pendentes]),
+            width="stretch", hide_index=True,
+        )
+        st.caption("Abra o ticket na barra lateral e vá para a aba **Diagnóstico & HITL** "
+                   "para confirmar ou cancelar.")
+    else:
+        st.success("Nenhuma aprovação pendente nesta sessão.", icon="✓")
+
+    st.caption(
+        "A fila cobre **esta sessão**. O grafo usa o `MemorySaver`, que guarda o checkpoint em "
+        "memória do processo — reiniciar a aplicação descarta execuções pausadas. Em produção, "
+        "trocar por um checkpointer persistente (Postgres) faria a fila sobreviver a reinícios."
+    )
+
+    st.markdown("---")
+    st.markdown("### Autonomia por conjunto")
+    st.caption(
+        "Só a decisão `agir` passa por confirmação humana — é a única que escreve na "
+        "plataforma. `orientar` e `escalar` não alteram estado e correm de ponta a ponta. "
+        "Os números vêm dos arquivos `eval/results-*.json`, então sobrevivem a reinícios."
+    )
+
+    linhas = []
+    for split, rotulo in (("train", "treino"), ("test", "teste held-out"), ("derivados", "derivados")):
+        dados = _autonomia_do_conjunto(split)
+        if not dados:
+            continue
+        pct = dados["autonomos"] / dados["total"]
+        linhas.append({
+            "Conjunto": rotulo,
+            "Tickets": dados["total"],
+            "Resolvidos sem humano": dados["autonomos"],
+            "Exigiram confirmação": dados["com_humano"],
+            "Autonomia": f"{pct:.0%}",
+            "Quais exigiram": ", ".join(dados["tickets"]) or "—",
+        })
+
+    if linhas:
+        st.dataframe(pd.DataFrame(linhas), width="stretch", hide_index=True)
+        total = sum(l["Tickets"] for l in linhas)
+        humanos = sum(l["Exigiram confirmação"] for l in linhas)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Tickets avaliados", total)
+        c2.metric("Sem intervenção", total - humanos, f"{(total-humanos)/total:.0%}")
+        c3.metric("Com confirmação", humanos, f"{humanos/total:.0%}")
+    else:
+        st.info("Nenhum resultado de avaliação salvo ainda. Rode `make eval` ou use a aba Métricas.")
+
+
 def tab_playground(cases: List[Dict[str, Any]]):
     """Aba para testar qualquer chamado customizado livremente."""
     st.markdown("""
@@ -1493,8 +1605,11 @@ def main():
     is_interrupted = st.session_state.get(interrupted_key, False)
 
     # Abas da Aplicação
-    tab_diag, tab_tr, tab_met, tab_play = st.tabs([
+    pendentes_n = len(_tickets_pendentes())
+    rotulo_notif = f"🔔 Aprovações ({pendentes_n})" if pendentes_n else "🔔 Aprovações"
+    tab_diag, tab_notif, tab_tr, tab_met, tab_play = st.tabs([
         "📋 Diagnóstico & HITL",
+        rotulo_notif,
         "🔍 Trace & Sinais Técnicos",
         "📈 Métricas & Avaliação",
         "🧪 Playground",
@@ -1502,6 +1617,9 @@ def main():
 
     with tab_diag:
         tab_diagnostico(selected_case, result, elapsed, is_interrupted)
+
+    with tab_notif:
+        tab_notificacoes(cases)
 
     with tab_tr:
         tab_trace(result)
