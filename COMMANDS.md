@@ -237,3 +237,34 @@ O cache de decisões devolve resultados do disco sem chamar o LLM. Para medir cu
 .venv\Scripts\python.exe -m pytest tests/ -q     # 73 testes do agente, sem chamar LLM
 make test                                          # 39 testes da API industrial
 ```
+
+### `make demo`
+
+> **Descrição:** Prepara tudo e abre a plataforma pronta para demonstrar. Use antes de uma
+> apresentação.
+> **O que ele faz, em ordem:**
+> 1. Sobe a API industrial (`:8000`).
+> 2. Sobe Postgres e Phoenix, esperando o Phoenix aceitar conexões, e cria a tabela.
+> 3. Roda a avaliação no treino — isso popula as **métricas**, a **taxa de autonomia** e os
+>    **traces no Phoenix**.
+> 4. Abre o console Streamlit.
+
+```bash
+make demo
+```
+
+> **A ressalva que importa:** a fila de aprovações do HITL vive na **sessão do navegador**.
+> Rodar a avaliação por fora não a preenche, porque o runner aprova os `interrupt()`
+> automaticamente. Para demonstrar o HITL, use o botão na aba **Aprovações** — ele processa
+> apenas os tickets que exigem confirmação (~40s em vez dos ~6 min de rodar os 17).
+
+### O que fica pronto ao abrir
+
+| aba | disponível sem rodar nada? |
+| :--- | :--- |
+| Métricas & Avaliação | sim — lê de `eval/results-*.json` |
+| Aprovações → autonomia | sim — mesma fonte |
+| Aprovações → fila | não — use o botão da aba |
+| Diagnóstico & HITL | não — precisa executar um ticket |
+| Trace & Sinais | não — precisa executar um ticket |
+| Phoenix (`:6006`) | sim — traces persistidos no Postgres |

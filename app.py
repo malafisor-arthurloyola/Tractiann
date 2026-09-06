@@ -1422,11 +1422,75 @@ def _autonomia_do_conjunto(split: str) -> dict | None:
     }
 
 
+def _tickets_que_exigem_aprovacao(split: str = "train") -> list:
+    """Tickets que, na última avaliação, terminaram em `act`.
+
+    Só esses passam pelo HITL. Processar apenas eles enche a fila em segundos, em
+    vez dos ~6 minutos que levaria rodar os 17 — e é o suficiente para demonstrar
+    o mecanismo.
+    """
+    caminho = _caminho_resultados(split)
+    if not caminho.exists():
+        return []
+    dados = json.loads(caminho.read_text(encoding="utf-8"))
+    return [r.get("ticket_id") for r in dados.get("results", []) if r.get("decision") == "act"]
+
+
+def _preencher_fila(cases: List[Dict[str, Any]]) -> int:
+    """Roda os tickets que exigem aprovação e os deixa pausados no interrupt.
+
+    A fila do HITL vive na sessão do navegador: rodar por fora (`make eval`)
+    preenche métricas e Phoenix, mas não deixa nada pendente — o runner aprova os
+    interrupts automaticamente. Para a fila ter conteúdo, a execução precisa
+    acontecer aqui.
+    """
+    alvos = _tickets_que_exigem_aprovacao()
+    if not alvos:
+        return 0
+    por_id = {c["ticket_id"]: c for c in cases}
+    barra = st.progress(0.0, text="Processando...")
+    pausados = 0
+    for i, ticket_id in enumerate(alvos, 1):
+        caso = por_id.get(ticket_id)
+        if not caso:
+            continue
+        barra.progress(i / len(alvos), text=f"Processando {ticket_id}...")
+        try:
+            resultado, elapsed, interrompido = execute_agent_stepwise(caso)
+            st.session_state[f"result_{ticket_id}"] = resultado
+            st.session_state[f"elapsed_{ticket_id}"] = elapsed
+            st.session_state[f"is_interrupted_{ticket_id}"] = interrompido
+            pausados += bool(interrompido)
+        except Exception as e:
+            st.warning(f"{ticket_id} falhou: {e}", icon="⚠️")
+    barra.empty()
+    return pausados
+
+
 def tab_notificacoes(cases: List[Dict[str, Any]]):
     """Fila de aprovações pendentes e taxa de autonomia do agente."""
     st.markdown("### Aprovações pendentes")
 
     pendentes = _tickets_pendentes()
+
+    if not pendentes:
+        alvos = _tickets_que_exigem_aprovacao()
+        if alvos:
+            st.info(
+                f"A fila está vazia porque nenhum ticket foi executado nesta sessão. "
+                f"Pela última avaliação, **{len(alvos)}** exigem aprovação: "
+                f"`{'`, `'.join(alvos)}`.",
+                icon="💡",
+            )
+            if st.button(f"Processar os {len(alvos)} tickets que exigem aprovação",
+                         type="primary", key="btn_preencher_fila"):
+                pausados = _preencher_fila(cases)
+                if pausados:
+                    st.success(f"{pausados} ticket(s) aguardando sua decisão.", icon="✓")
+                else:
+                    st.info("Nenhum ticket pausou — as decisões podem ter mudado desde a "
+                            "última avaliação.", icon="ℹ️")
+                st.rerun()
     if pendentes:
         st.warning(f"{len(pendentes)} ticket(s) aguardando decisão humana. "
                    "O grafo está congelado neles até alguém confirmar ou cancelar.", icon="⚠️")

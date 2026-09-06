@@ -30,7 +30,7 @@ PY_ABS := $(CURDIR)/.venv/Scripts/python.exe
 
 .DEFAULT_GOAL := help
 
-.PHONY: all help setup deps data agent-env up up-api up-agent up-all stop logs test clean clean-data postgres-up postgres-down postgres-init eval run phoenix-up phoenix-down up-obs compare compare-versions prova-final evolucao evolucao-md derivados
+.PHONY: all help setup deps data agent-env up up-api up-agent up-all stop logs test clean clean-data postgres-up postgres-down postgres-init eval run phoenix-up phoenix-down up-obs compare compare-versions prova-final evolucao evolucao-md derivados demo
 
 all: up-all ## Alias para up-all (sobe API + Streamlit)
 
@@ -46,6 +46,7 @@ help: ## Mostra esta ajuda
 	@echo   phoenix-up   - Sobe o Phoenix (tracing open source) :6006
 	@echo   phoenix-down - Para o Phoenix
 	@echo   up-obs       - Sobe Postgres + Phoenix juntos (observabilidade)
+	@echo   demo         - Prepara tudo e abre a plataforma pronta para demonstrar
 	@echo   eval         - Roda avaliação no TREINO (sem juiz LLM) — dev
 	@echo   run          - Roda avaliação no treino (com juiz LLM)
 	@echo   prova-final  - Roda o TESTE held-out (generalização, com juiz)
@@ -77,6 +78,24 @@ up-api: ## Só a API industrial (:8000) em background
 	$(UP_API_CMD)
 	@powershell -Command "Start-Sleep -Seconds 2"
 	@echo "✓ API iniciada em background (:8000)"
+
+demo: ## Prepara TUDO e abre a plataforma pronta para demonstrar
+	@echo "1/4  API industrial"
+	$(UP_API_CMD)
+	@powershell -Command "Start-Sleep -Seconds 3"
+	@echo "2/4  Postgres + Phoenix"
+	docker compose up -d postgres-agent phoenix
+	@powershell -Command "$$ok=$$false; for($$i=0;$$i -lt 40;$$i++){ try{ Invoke-WebRequest -Uri http://localhost:6006 -UseBasicParsing -TimeoutSec 2 | Out-Null; $$ok=$$true; break }catch{ Start-Sleep -Seconds 2 } }"
+	$(PY) -c "from agent.logging.postgres import init_db; init_db()"
+	@echo "3/4  Avaliacao (popula metricas, autonomia e traces no Phoenix)"
+	$(PY) -m eval.runner --split train --no-judge
+	@echo "4/4  Console Streamlit"
+	@echo ""
+	@echo "    A fila de aprovacoes vive na sessao do navegador — rodar por aqui nao a"
+	@echo "    preenche. Na aba Aprovacoes ha um botao que processa so os tickets que"
+	@echo "    exigem confirmacao (~40s), para demonstrar o HITL."
+	@echo ""
+	$(PY) -m streamlit run app.py
 
 up-agent: ## Sobe a interface Streamlit (:8501)
 	$(PY) -m streamlit run app.py
