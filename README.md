@@ -41,18 +41,42 @@ de dado vazias. A versão entregue acerta menos e nunca erra desse jeito.
 
 ## Arquitetura
 
-```
-ticket ──► investigate ──► quality_check ──► decide ──┬─► orientar
-              ▲                  │                    ├─► agir       (confirmação humana antes)
-              └──────────────────┘                    └─► escalar
-                evidência compensatória
+```mermaid
+flowchart LR
+    T(["ticket"]) --> INV["investigate"]
+    INV --> QC{"quality_check"}
+    QC -- "evidência compensatória<br/>outro endpoint, nunca o mesmo GET" --> INV
+    QC --> DEC["decide"]
 
-  investigate ──► mcp_client ──stdio──► mcp_server ──HTTP──► API industrial (:8000)
-                                        18 tools
+    DEC --> ORI["orientar"]
+    DEC -- "confirmação humana antes" --> ACT["agir"]
+    DEC --> ESC["escalar"]
 
-  Phoenix (:6006) ◄── spans de HTTP, nós e LLM
-  Postgres (:5432) ◄── execuções por versão · também guarda os traces do Phoenix
+    subgraph MCP["camada MCP - ADR-0001"]
+        direction LR
+        MC["mcp_client"] -- "stdio" --> MS["mcp_server<br/>18 tools"]
+    end
+
+    INV --> MC
+    MS -- "HTTP" --> API[("API industrial<br/>:8000")]
+    ACT --> MC
+    ESC --> MC
+
+    DEC -. "fallback automático" .-> LLM["omniroute → openrouter → groq"]
+
+    INV -. "spans" .-> PHX[("Phoenix<br/>:6006")]
+    DEC -. "spans" .-> PHX
+    DEC -. "execução" .-> PG[("Postgres<br/>:5432")]
+    PHX -. "traces" .-> PG
+
+    classDef saida fill:#e8f2fd,stroke:#1f6fd0,color:#0d1418
+    classDef obs fill:#f1f3f4,stroke:#73828a,color:#0d1418
+    class ORI,ACT,ESC saida
+    class PHX,PG,LLM obs
 ```
+
+Os nós do grafo **não conhecem URL**: pedem uma tool pelo nome e a camada MCP resolve.
+As setas pontilhadas são observação — não fazem parte do fluxo de decisão.
 
 Três decisões que governam o comportamento:
 
