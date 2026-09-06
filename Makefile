@@ -30,7 +30,7 @@ PY_ABS := $(CURDIR)/.venv/Scripts/python.exe
 
 .DEFAULT_GOAL := help
 
-.PHONY: all help setup deps data agent-env up up-api up-agent up-all stop logs test clean clean-data postgres-up postgres-down postgres-init eval run phoenix-up phoenix-down up-obs compare compare-versions prova-final evolucao evolucao-md
+.PHONY: all help setup deps data agent-env up up-api up-agent up-all stop logs test clean clean-data postgres-up postgres-down postgres-init eval run phoenix-up phoenix-down up-obs compare compare-versions prova-final evolucao evolucao-md derivados
 
 all: up-all ## Alias para up-all (sobe API + Streamlit)
 
@@ -135,6 +135,9 @@ prova-final: ## Roda o TESTE held-out (prova de generalização) com juiz LLM
 
 compare: ## Compara decisões entre versões no Postgres (make compare versaoA versaoB)
 	$(PY) -m eval.compare $(filter-out $@,$(MAKECMDGOALS))
+
+derivados: ## Roda os cenarios DERIVADOS (construidos por mim) — reporte sempre separado
+	$(PY) -m eval.runner --split derivados
 
 evolucao: ## Tabela de evolução entre versões (acurácia + eixos do juiz)
 	$(PY) -m eval.evolucao
