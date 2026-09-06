@@ -21,26 +21,57 @@ def load_expected_paths() -> list:
 
 
 def expected_decision(expected: dict) -> str | None:
-    """Deriva a decisão esperada do último passo do gabarito.
+    """Deriva a decisão esperada procurando a mutação em TODO o gabarito.
 
-    Um `expected_path` que termina em POST /escalate espera `escalate`; que
-    termina em reprocess/retrain/specialist espera `act`; qualquer outro
-    (termina em GET) espera `orient`.
+    Ler só o último passo não funciona: vários `expected_path` terminam com um
+    GET de validação DEPOIS da mutação. O TKT-EXE-14 é o caso — pede "muda a
+    criticidade", faz o PATCH, e termina relendo o ativo para conferir. Pelo
+    último passo ele era rotulado `orient`, quando o esperado é `act`.
+
+    Um caminho que contém escalonamento espera `escalate`; que contém
+    reprocess/retrain/specialist ou um PATCH espera `act`; sem nenhuma mutação,
+    espera `orient`.
     """
-    path = expected.get("expected_path", [])
-    if not path:
+    passos = [p.get("step", "") for p in expected.get("expected_path", [])]
+    if not passos:
         return None
-    last = path[-1].get("step", "")
-    if "escalate" in last:
+
+    if any("escalate" in s for s in passos):
         return "escalate"
     # Casa sem exigir a barra: os endpoints reais são `request-specialist` e
     # `request-retraining`, então procurar "/specialist" e "/retrain" não
     # encontrava nada e rotulava esses casos como `orient` por engano.
-    if any(k in last for k in ("reprocess", "retrain", "specialist")):
-        return "act"
-    if last.startswith("PATCH"):
-        return "act"
+    for s in passos:
+        if any(k in s for k in ("reprocess", "retrain", "specialist")):
+            return "act"
+        if s.startswith("PATCH"):
+            return "act"
     return "orient"
+
+
+# Escada de consequência da decisão, do mais seguro ao mais arriscado.
+# `escalate` não afirma nem altera nada; `orient` faz uma afirmação técnica sobre
+# uma máquina; `act` altera estado na plataforma.
+CONSEQUENCIA = {"escalate": 0, "orient": 1, "act": 2}
+
+
+def classificar_erro(esperado: str | None, real: str | None) -> str | None:
+    """Classifica um erro de decisão como conservador ou arriscado.
+
+    Num contexto industrial os dois erros não custam igual. Orientar errado sobre
+    uma máquina em falha custa mais caro que ocupar um engenheiro com um caso que
+    talvez desse para resolver remotamente. O gabarito trata todo desvio como
+    erro de mesmo peso; esta função separa os dois lados.
+
+    Returns:
+        None se acertou, "conservador" se decidiu algo MENOS consequente que o
+        esperado, "arriscado" se decidiu algo MAIS consequente.
+    """
+    if not esperado or not real or esperado == real:
+        return None
+    if esperado not in CONSEQUENCIA or real not in CONSEQUENCIA:
+        return None
+    return "arriscado" if CONSEQUENCIA[real] > CONSEQUENCIA[esperado] else "conservador"
 
 
 def _expected_api_categories(expected: dict) -> set:
@@ -157,6 +188,7 @@ def assert_trajectory(result: dict, expected: dict) -> dict:
         "passed": decision_ok,
         "score": round(score / total, 3),
         "decision_ok": decision_ok,
+        "erro_tipo": classificar_erro(exp_decision, real_decision),
         "details": details,
     }
 

@@ -442,3 +442,101 @@ class TestMCPServerRegistro:
         fonte = Path("agent/tools/mcp_server.py").read_text(encoding="utf-8")
         assert '__name__ == "__main__"' in fonte
         assert 'mcp.run(transport="stdio")' in fonte
+
+
+# ---- Tests: curadoria do balanço de evidência ----
+
+class TestResumoRms:
+    """A comparação com o limiar é feita em Python, não pelo LLM.
+
+    O juiz flagrou o agente afirmando "valores de vibração acima dos limites"
+    num ticket onde isso era falso. Entregar 30 amostras cruas e esperar
+    aritmética correta é convite à alucinação.
+    """
+
+    def _serie(self, valores, limiar=1.8):
+        return {
+            "unit": "mm/s", "baseline_reference": 1.2, "baseline_state": "established",
+            "alarm_threshold": limiar,
+            "samples": [{"ts": f"t{i}", "value": v} for i, v in enumerate(valores)],
+        }
+
+    def test_detecta_que_nao_ultrapassou(self):
+        from agent.graph.nodes import _resumir_rms
+        r = _resumir_rms(self._serie([1.1, 1.2, 1.09]))
+        assert r["ultrapassou_limiar"] is False
+        assert r["n_amostras_acima_do_limiar"] == 0
+
+    def test_detecta_que_ultrapassou(self):
+        from agent.graph.nodes import _resumir_rms
+        r = _resumir_rms(self._serie([1.1, 2.4, 1.9]))
+        assert r["ultrapassou_limiar"] is True
+        assert r["n_amostras_acima_do_limiar"] == 2
+        assert r["ultimo_acima_do_limiar"] is True
+
+    def test_tendencia_subindo(self):
+        from agent.graph.nodes import _resumir_rms
+        assert _resumir_rms(self._serie([1.0, 1.2, 1.5]))["tendencia"] == "subindo"
+
+    def test_tendencia_estavel(self):
+        from agent.graph.nodes import _resumir_rms
+        assert _resumir_rms(self._serie([1.0, 1.01, 1.02]))["tendencia"] == "estavel"
+
+    def test_tendencia_caindo(self):
+        from agent.graph.nodes import _resumir_rms
+        assert _resumir_rms(self._serie([1.5, 1.2, 0.9]))["tendencia"] == "caindo"
+
+    def test_serie_vazia_nao_quebra(self):
+        from agent.graph.nodes import _resumir_rms
+        r = _resumir_rms({"alarm_threshold": 1.8, "samples": []})
+        assert r["n_amostras"] == 0
+        assert "observacao" in r
+
+    def test_sem_limiar_nao_inventa_comparacao(self):
+        from agent.graph.nodes import _resumir_rms
+        r = _resumir_rms({"samples": [{"value": 1.0}]})
+        assert "ultrapassou_limiar" not in r
+
+    def test_nao_carrega_as_amostras_cruas(self):
+        """O ponto da curadoria: as 30 amostras não vão para o prompt."""
+        from agent.graph.nodes import _resumir_rms
+        assert "samples" not in _resumir_rms(self._serie([1.0] * 30))
+
+
+class TestCuradoriaEvidencia:
+
+    def test_baseline_mantem_o_que_decide(self):
+        from agent.graph.nodes import _resumir_evidencia
+        r = _resumir_evidencia("baseline", {
+            "id": "bs_1", "state": "invalidated", "detection_mode": "baseline",
+            "learnable": True, "invalidation_reason": "maintenance_intervention",
+            "established_at": "2025-12-27", "features": [{"reference": 1.2}],
+        })
+        assert r["state"] == "invalidated"
+        assert r["invalidation_reason"] == "maintenance_intervention"
+
+    def test_spectrum_preserva_os_picos(self):
+        from agent.graph.nodes import _resumir_evidencia
+        picos = [{"freq_hz": 200, "amplitude_mm_s": 1.6, "note": "1x"}]
+        r = _resumir_evidencia("spectrum", {"peaks": picos, "asset_id": "a1"})
+        assert r["peaks"] == picos
+
+    def test_asset_info_descarta_frequencias_nulas(self):
+        from agent.graph.nodes import _resumir_evidencia
+        r = _resumir_evidencia("asset_info", {
+            "id": "asset_M102", "machine_type": "motor_dc", "rotation_rpm": 1200,
+            "bpfo_hz": None, "bpfi_hz": None, "sensor_status": "online",
+        })
+        assert "bpfo_hz" not in r
+        assert r["machine_type"] == "motor_dc"
+
+    def test_model_mantem_processing_state(self):
+        from agent.graph.nodes import _resumir_evidencia
+        r = _resumir_evidencia("model", {"id": "mdl_vib_v3", "processing_state": "delayed",
+                                         "coverage": [], "outro": None})
+        assert r["processing_state"] == "delayed"
+        assert "outro" not in r
+
+    def test_payload_nao_dict_passa_intacto(self):
+        from agent.graph.nodes import _resumir_evidencia
+        assert _resumir_evidencia("rms", None) is None

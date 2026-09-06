@@ -24,10 +24,10 @@ from typing import Literal
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
+from ..llm import build_llm, modelo_efetivo
 from ..logging.phoenix import record_node
 from ..tools.mcp_client import call_tool
 from .state import AgentState
@@ -36,14 +36,14 @@ from .state import AgentState
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
-def _get_llm():
-    """Cria o LLM sob demanda (lazy). Só falha se não tiver API key no uso."""
-    return ChatOpenAI(
-        model=os.getenv("OPENAI_MODEL", "openai/gpt-oss-20b"),
-        base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
-        api_key=os.getenv("OPENAI_API_KEY", ""),
-        temperature=0.3,
-    )
+def _get_llm(structured_output=None, include_raw: bool = False):
+    """LLM sob demanda (lazy), com fallback entre provedores.
+
+    Ver `agent/llm.py`: se a cota do provedor principal acabar, a chamada cai
+    automaticamente no próximo configurado.
+    """
+    return build_llm(temperature=0.3, structured_output=structured_output,
+                     include_raw=include_raw)
 
 
 # ---------------------------------------------------------------------------
@@ -336,11 +336,39 @@ class AgentDecision(BaseModel):
         default=None,
         description="id do alvo: analysis_id (reprocess/specialist), model_id (retrain) ou asset_id (update_config)",
     )
+    # Estes dois campos são um andaime de raciocínio: obrigam o modelo a
+    # enumerar o que de fato observou e o que faltou ANTES de redigir a
+    # resposta. Sem eles o juiz apontava respostas fluentes mas mal
+    # fundamentadas — e, pior, afirmando coisas que a evidência não sustentava.
+    evidencias: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Evidências CONCRETAS observadas que sustentam a decisão, uma por item. "
+            "Cite o dado e seu valor (ex.: 'baseline.state = invalidated', "
+            "'model.processing_state = delayed'). NUNCA liste algo que não apareça "
+            "nas evidências fornecidas."
+        ),
+    )
+    limitacoes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "O que faltou e COMO isso limita a conclusão, uma por item "
+            "(ex.: 'rms indisponível: não dá para confirmar a tendência de vibração'). "
+            "Lista vazia só se realmente não houve lacuna alguma."
+        ),
+    )
     justification: str = Field(
         description="Justificativa técnica interna, EM PORTUGUÊS, citando as evidências que sustentam a decisão"
     )
     customer_message: str = Field(
-        description="Resposta ao cliente EM PORTUGUÊS, em linguagem simples, sem jargão, reconhecendo lacunas quando houver"
+        description=(
+            "Resposta ao cliente EM PORTUGUÊS. Estrutura obrigatória, em prosa corrida "
+            "(sem títulos nem listas): (1) responda DIRETAMENTE o que ele perguntou; "
+            "(2) explique com base nas `evidencias`, traduzindo o jargão; "
+            "(3) reconheça as `limitacoes` explicitamente, se houver; "
+            "(4) diga qual é o próximo passo. Nunca afirme como certo algo que as "
+            "evidências não mostram."
+        )
     )
 
 
@@ -403,7 +431,104 @@ Comece por O QUE O CLIENTE PEDIU; depois confirme se a evidência sustenta.
 
 Na dúvida entre ORIENT e ACT, prefira ORIENT.
 Na dúvida entre ORIENT e ESCALATE, só escale se a evidência realmente não permitir
-uma explicação honesta, ou se o caso exigir presença física."""
+uma explicação honesta, ou se o caso exigir presença física.
+
+## Padrão de qualidade da resposta
+A resposta é avaliada em quatro eixos. O que separa uma resposta boa de uma medíocre:
+
+- HONESTIDADE: dizer explicitamente o que faltou e como isso limita a conclusão.
+  Silenciar sobre a lacuna já é falha; afirmar como fato algo que os dados não
+  mostram é a falha grave.
+- FUNDAMENTAÇÃO: citar a evidência ESPECÍFICA que leva àquela conclusão — o estado
+  do baseline, o detection_mode, o pico do espectro, o processing_state do modelo.
+  "Analisamos os dados e está tudo bem" não fundamenta nada.
+- CLAREZA: linguagem de conversa, sem jargão não explicado. O cliente precisa
+  terminar de ler sabendo qual é o próximo passo.
+- SEGURANÇA: o nível de intervenção tem que corresponder ao que a evidência
+  sustenta — nem agir no escuro, nem escalar tendo a resposta em mãos."""
+
+
+def _resumir_rms(data: dict) -> dict:
+    """Condensa a série de RMS no que decide, em vez de 30 amostras cruas.
+
+    Duas razões. A primeira é custo: as amostras eram o maior bloco do prompt.
+    A segunda importa mais — pedir ao LLM que compare 30 números com um limiar é
+    pedir aritmética, justamente onde ele erra. O juiz flagrou o agente afirmando
+    "valores de vibração acima dos limites" num ticket em que isso não era
+    verdade. Aqui a comparação é feita em Python e entregue pronta.
+    """
+    amostras = [a for a in (data.get("samples") or []) if isinstance(a, dict)]
+    valores = [a["value"] for a in amostras if isinstance(a.get("value"), (int, float))]
+    limiar = data.get("alarm_threshold")
+
+    resumo = {
+        "unit": data.get("unit"),
+        "baseline_reference": data.get("baseline_reference"),
+        "baseline_state": data.get("baseline_state"),
+        "alarm_threshold": limiar,
+        "n_amostras": len(valores),
+    }
+    if not valores:
+        resumo["observacao"] = "sem amostras na série"
+        return resumo
+
+    primeiro, ultimo = valores[0], valores[-1]
+    resumo.update({
+        "primeiro": round(primeiro, 3),
+        "ultimo": round(ultimo, 3),
+        "minimo": round(min(valores), 3),
+        "maximo": round(max(valores), 3),
+        "variacao_pct": round((ultimo - primeiro) / primeiro * 100, 1) if primeiro else None,
+        "tendencia": "subindo" if ultimo > primeiro * 1.05
+                     else "caindo" if ultimo < primeiro * 0.95
+                     else "estavel",
+    })
+    if isinstance(limiar, (int, float)):
+        acima = [v for v in valores if v > limiar]
+        resumo["ultrapassou_limiar"] = bool(acima)
+        resumo["n_amostras_acima_do_limiar"] = len(acima)
+        resumo["ultimo_acima_do_limiar"] = ultimo > limiar
+    return resumo
+
+
+def _sem_nulos(data: dict) -> dict:
+    """Remove campos nulos — ruído que o modelo pode confundir com dado ausente."""
+    return {k: v for k, v in data.items() if v not in (None, [], {})}
+
+
+def _resumir_evidencia(categoria: str, data) -> object:
+    """Cura o payload de uma categoria para o balanço de evidência.
+
+    Entregar JSON cru convida o modelo a citar campos que não leu direito. Cada
+    categoria devolve só o que sustenta uma decisão.
+    """
+    if not isinstance(data, dict):
+        return data
+    if categoria == "rms":
+        return _resumir_rms(data)
+    if categoria == "spectrum":
+        # `peaks` já vem compacto e é o sinal: freq, amplitude e a nota (1x, 2x...).
+        return _sem_nulos({
+            "collected_at": data.get("collected_at"),
+            "peaks": data.get("peaks"),
+            "bands_missing": data.get("bands_missing"),
+        })
+    if categoria == "baseline":
+        return _sem_nulos({
+            k: data.get(k) for k in
+            ("state", "detection_mode", "learnable", "invalidation_reason", "features")
+        })
+    if categoria == "asset_info":
+        return _sem_nulos({
+            k: data.get(k) for k in
+            ("id", "machine_type", "criticality", "rotation_rpm", "sensor_status",
+             "bpfo_hz", "bpfi_hz", "bsf_hz", "ftf_hz", "line_frequency_hz", "points")
+        })
+    if categoria == "model":
+        return _sem_nulos({
+            k: data.get(k) for k in ("id", "version", "processing_state", "coverage")
+        })
+    return _sem_nulos(data)
 
 
 def _evidence_ledger(state: AgentState) -> str:
@@ -434,7 +559,7 @@ def _evidence_ledger(state: AgentState) -> str:
             else:
                 parts.append(f"[{cat}] mode={mode} — nenhuma análise registrada")
         elif mode in USABLE_MODES:
-            parts.append(f"[{cat}] mode={mode} — {env.get('data')}")
+            parts.append(f"[{cat}] mode={mode} — {_resumir_evidencia(cat, env.get('data'))}")
         else:
             parts.append(f"[{cat}] mode={mode} — SEM DADO ({env.get('notes') or ''})")
 
@@ -503,7 +628,9 @@ def decide(state: AgentState) -> dict:
 
     cached = _cached_decision(context_text)
     if cached is not None:
-        record_node("decide.outcome", **{"cache.hit": True, "decision": cached.decision})
+        cached, modelo_cache = cached
+        record_node("decide.outcome", **{"cache.hit": True, "decision": cached.decision,
+                                         "llm.model_efetivo": modelo_cache})
         action_type, action_target = _validate_action(cached, state)
         return {
             "decision": cached.decision,
@@ -512,23 +639,33 @@ def decide(state: AgentState) -> dict:
             "action_type": action_type,
             "action_target": action_target,
             "trace": [{"node": "decide", "decision": cached.decision,
-                       "action": action_type, "from_cache": True}],
+                       "action": action_type, "from_cache": True,
+                       "modelo": modelo_cache}],
         }
 
-    llm = _get_llm().with_structured_output(AgentDecision)
-    result: AgentDecision = llm.invoke([
+    # include_raw devolve tambem a resposta bruta, de onde sai o modelo real.
+    llm = _get_llm(structured_output=AgentDecision, include_raw=True)
+    bruto = llm.invoke([
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=context_text),
     ])
+    result: AgentDecision = bruto["parsed"]
+    if result is None:
+        raise RuntimeError(f"LLM não produziu decisão válida: {bruto.get('parsing_error')}")
+    modelo = modelo_efetivo(bruto.get("raw"))
 
-    _write_decision_cache(context_text, result)
+    _write_decision_cache(context_text, result, modelo)
     action_type, action_target = _validate_action(result, state)
 
     record_node("decide.outcome", **{
         "cache.hit": False,
         "decision": result.decision,
         "action.type": action_type,
-        "llm.model": os.getenv("OPENAI_MODEL", ""),
+        # O slug pedido pode ser um combo; `llm.model_efetivo` e quem respondeu.
+        "llm.model_solicitado": os.getenv("OPENAI_MODEL", ""),
+        "llm.model_efetivo": modelo,
+        "response.evidencias": result.evidencias,
+        "response.limitacoes": result.limitacoes,
     })
 
     return {
@@ -538,7 +675,8 @@ def decide(state: AgentState) -> dict:
         "action_type": action_type,
         "action_target": action_target,
         "trace": [{"node": "decide", "decision": result.decision,
-                   "action": action_type, "from_cache": False}],
+                   "action": action_type, "from_cache": False,
+                   "modelo": modelo}],
     }
 
 
@@ -563,7 +701,8 @@ def _cache_key(context_text: str) -> str:
     return hashlib.sha1(f"{AGENT_VERSION}:{context_text}".encode("utf-8")).hexdigest()
 
 
-def _cached_decision(context_text: str) -> AgentDecision | None:
+def _cached_decision(context_text: str) -> tuple[AgentDecision, str | None] | None:
+    """Devolve (decisão, modelo que a gerou), ou None se não houver cache."""
     if not _cache_enabled():
         return None
     try:
@@ -571,19 +710,25 @@ def _cached_decision(context_text: str) -> AgentDecision | None:
         if not path.exists():
             return None
         import json
-        return AgentDecision(**json.loads(path.read_text(encoding="utf-8")))
+        dados = json.loads(path.read_text(encoding="utf-8"))
+        modelo = dados.pop("_modelo", None)
+        return AgentDecision(**dados), modelo
     except Exception:
         return None
 
 
-def _write_decision_cache(context_text: str, decision: AgentDecision) -> None:
+def _write_decision_cache(context_text: str, decision: AgentDecision,
+                          modelo: str | None = None) -> None:
     if not _cache_enabled():
         return
     try:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         import json
         path = _CACHE_DIR / f"{_cache_key(context_text)}.json"
-        path.write_text(json.dumps(decision.model_dump(), ensure_ascii=False), encoding="utf-8")
+        # `_modelo` fora do schema: preserva de qual modelo veio a decisão
+        # guardada, senão uma rodada com cache reportaria modelo desconhecido.
+        payload = {**decision.model_dump(), "_modelo": modelo}
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 

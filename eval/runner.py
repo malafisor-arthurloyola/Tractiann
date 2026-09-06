@@ -13,11 +13,16 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / "agent" / ".env")
 
-from langgraph.types import Interrupt, Command
+from langgraph.types import Command
 
 from agent.graph.agent import agent_graph
 from agent.logging.phoenix import flush as phoenix_flush
-from agent.logging.phoenix import run_in_phoenix_trace, setup_phoenix_tracing
+from agent.logging.phoenix import (
+    log_evaluations,
+    run_in_phoenix_trace,
+    setup_phoenix_tracing,
+    span_id_hex,
+)
 from eval.assertions.trajectory import (
     assert_trajectory,
     expected_decision,
@@ -37,11 +42,12 @@ def run_graph(state: dict) -> dict:
     # thread_id único por execução evita retomar checkpoints antigos no MemorySaver
     run_id = f"{state['ticket_id']}-run-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
     config = {"configurable": {"thread_id": run_id}}
-    try:
-        result = agent_graph.invoke(state, config=config)
-    except Interrupt:
-        result = agent_graph.invoke(Command(resume=True), config=config)
-    # Com MemorySaver o interrupt não levanta exceção: retorna com __interrupt__
+    # `Interrupt` do LangGraph é um dataclass, não uma exceção: um
+    # `except Interrupt` era invalido e, sempre que algo estourava aqui dentro,
+    # o Python falhava ao avaliar a clausula e MASCARAVA o erro real com
+    # "catching classes that do not inherit from BaseException".
+    # Com MemorySaver o interrupt nao levanta excecao mesmo: volta em __interrupt__.
+    result = agent_graph.invoke(state, config=config)
     if "__interrupt__" in result:
         result = agent_graph.invoke(Command(resume=True), config=config)
     return result
@@ -78,9 +84,12 @@ def run_single(case: dict, expected: dict, run_judge: bool = True) -> dict:
         dict com case_id, trajectory (determinístico), judge (subjetivo), result
     """
     # 1. Executa o agente (aprova automaticamente qualquer interrupt — HITL)
+    span_id = None
     try:
-        with run_in_phoenix_trace(case["id"], case["ticket_id"], asset_id=case.get("asset_id")):
+        with run_in_phoenix_trace(case["id"], case["ticket_id"], asset_id=case.get("asset_id")) as root_span:
             result = run_graph(build_initial_state(case))
+            # Capturado ainda dentro do `with`: depois do __exit__ o span fechou.
+            span_id = span_id_hex(root_span)
     except Exception as e:
         return {
             "case_id": case["id"],
@@ -110,9 +119,12 @@ def run_single(case: dict, expected: dict, run_judge: bool = True) -> dict:
             # provedor, não por qualidade ruim da resposta do agente.
             judge = {"error": str(e)}
 
+    _publicar_avaliacoes(span_id, trajectory, judge)
+
     return {
         "case_id": case["id"],
         "ticket_id": case["ticket_id"],
+        "span_id": span_id,
         "decision": result.get("decision"),
         "quality_verdict": result.get("quality_verdict"),
         "gaps": result.get("data_gaps") or {},
@@ -122,6 +134,49 @@ def run_single(case: dict, expected: dict, run_judge: bool = True) -> dict:
         "response": result.get("response"),
         "decision_justification": result.get("decision_justification"),
     }
+
+
+# Critérios do juiz que viram anotação no Phoenix.
+_CRITERIOS_JUIZ = ("honestidade", "clareza", "fundamentacao", "seguranca", "nota_geral")
+
+
+def _publicar_avaliacoes(span_id: str | None, trajectory: dict | None, judge: dict | None) -> None:
+    """Anexa as notas ao span do ticket, para aparecerem na aba Evaluations.
+
+    Sem isso as notas do juiz ficam só no JSON de resultados, e a única forma de
+    achar as respostas ruins é garimpar o arquivo. Com isso dá para ordenar os
+    traces por nota no dashboard e abrir os piores direto.
+    """
+    if not span_id:
+        return
+
+    avaliacoes: dict[str, dict] = {}
+
+    # Determinística: acertou a decisão? (annotator CODE — não é opinião de LLM)
+    if trajectory:
+        acertou = bool(trajectory.get("decision_ok"))
+        avaliacoes["decisao_correta"] = {
+            "score": 1.0 if acertou else 0.0,
+            "label": "correta" if acertou else (trajectory.get("erro_tipo") or "incorreta"),
+            "explanation": "; ".join(trajectory.get("details") or []),
+            "annotator_kind": "CODE",
+        }
+        avaliacoes["trajetoria"] = {
+            "score": float(trajectory.get("score") or 0),
+            "annotator_kind": "CODE",
+        }
+
+    # Subjetiva: as notas do juiz LLM
+    if judge and "error" not in judge:
+        for criterio in _CRITERIOS_JUIZ:
+            if criterio in judge:
+                avaliacoes[criterio] = {
+                    "score": float(judge[criterio]),
+                    "explanation": judge.get("razao"),
+                    "annotator_kind": "LLM",
+                }
+
+    log_evaluations(span_id, avaliacoes)
 
 
 def _log_result(case: dict, result: dict, agent_version: str | None = None) -> None:
@@ -204,10 +259,20 @@ def run_all(split: str = "train", run_judge: bool = True) -> dict:
         (r["expected_decision"], str(r.get("decision"))) for r in graded
     )
 
+    # Erros separados por lado da escada de consequência: um agente industrial
+    # que erra para o lado seguro (escalar) não é equivalente a um que erra para
+    # o lado arriscado (afirmar ou agir sem respaldo).
+    from eval.assertions.trajectory import classificar_erro
+    tipos = [classificar_erro(r.get("expected_decision"), r.get("decision")) for r in graded]
+    conservadores = sum(1 for x in tipos if x == "conservador")
+    arriscados = sum(1 for x in tipos if x == "arriscado")
+
     summary = {
         "total": len(results),
         "decision_accuracy": round(len(hits) / len(graded), 3) if graded else 0,
         "decision_hits": f"{len(hits)}/{len(graded)}",
+        "erros_conservadores": conservadores,
+        "erros_arriscados": arriscados,
         "decisions": dict(decisions),
         "verdicts": dict(verdicts),
         "trajectory_avg_score": round(sum(traj_scores) / len(traj_scores), 3) if traj_scores else 0,

@@ -30,7 +30,7 @@ PY_ABS := $(CURDIR)/.venv/Scripts/python.exe
 
 .DEFAULT_GOAL := help
 
-.PHONY: all help setup deps data agent-env up up-api up-agent up-all stop logs test clean clean-data postgres-up postgres-down postgres-init eval run phoenix-up phoenix-down up-obs compare compare-versions prova-final
+.PHONY: all help setup deps data agent-env up up-api up-agent up-all stop logs test clean clean-data postgres-up postgres-down postgres-init eval run phoenix-up phoenix-down up-obs compare compare-versions prova-final evolucao evolucao-md
 
 all: up-all ## Alias para up-all (sobe API + Streamlit)
 
@@ -49,6 +49,7 @@ help: ## Mostra esta ajuda
 	@echo   eval         - Roda avaliação no TREINO (sem juiz LLM) — dev
 	@echo   run          - Roda avaliação no treino (com juiz LLM)
 	@echo   prova-final  - Roda o TESTE held-out (generalização, com juiz)
+	@echo   evolucao     - Tabela de evolução entre versões do agente
 
 setup: deps data
 	@echo "✓ Setup concluído!"
@@ -134,6 +135,12 @@ prova-final: ## Roda o TESTE held-out (prova de generalização) com juiz LLM
 
 compare: ## Compara decisões entre versões no Postgres (make compare versaoA versaoB)
 	$(PY) -m eval.compare $(filter-out $@,$(MAKECMDGOALS))
+
+evolucao: ## Tabela de evolução entre versões (acurácia + eixos do juiz)
+	$(PY) -m eval.evolucao
+
+evolucao-md: ## Mesma tabela em markdown, para colar na apresentação
+	$(PY) -m eval.evolucao --md
 
 compare-versions: ## Lista versões/contagens gravadas no Postgres
 	$(PY) -m eval.compare --versions

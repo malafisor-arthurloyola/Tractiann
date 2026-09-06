@@ -199,3 +199,68 @@ def run_in_phoenix_trace(thread_id: str, ticket_id: str, **attrs):
             return False
 
     return _Ctx()
+
+
+# ---------------------------------------------------------------------------
+# Avaliações — fecha o ciclo trace → julgamento → dashboard
+# ---------------------------------------------------------------------------
+
+
+def span_id_hex(span) -> str | None:
+    """Id do span em hexadecimal, o formato que a API do Phoenix espera."""
+    if span is None:
+        return None
+    try:
+        contexto = span.get_span_context()
+        if not contexto or not contexto.span_id:
+            return None
+        return format(contexto.span_id, "016x")
+    except Exception:
+        return None
+
+
+def _phoenix_client():
+    """Cliente REST do Phoenix, ou None se o pacote/servidor não estiver lá."""
+    try:
+        from phoenix.client import Client
+        return Client(base_url=_PHOENIX_ENDPOINT)
+    except Exception:
+        return None
+
+
+def log_evaluations(span_id: str, avaliacoes: dict[str, dict]) -> int:
+    """Anexa notas a um span, que aparecem na aba **Evaluations** do Phoenix.
+
+    É o que transforma o juiz LLM de um número no terminal em algo navegável:
+    no dashboard dá para ordenar os traces por nota e abrir os piores, em vez de
+    garimpar o JSON de resultados.
+
+    Args:
+        span_id: hex do span raiz do ticket (ver `span_id_hex`)
+        avaliacoes: nome -> {score, label, explanation, annotator_kind}
+
+    Returns:
+        Quantas anotações foram gravadas (0 se o Phoenix não estiver acessível).
+    """
+    if not span_id:
+        return 0
+    cliente = _phoenix_client()
+    if cliente is None:
+        return 0
+
+    gravadas = 0
+    for nome, dados in avaliacoes.items():
+        try:
+            cliente.spans.add_span_annotation(
+                span_id=span_id,
+                annotation_name=nome,
+                annotator_kind=dados.get("annotator_kind", "LLM"),
+                score=dados.get("score"),
+                label=dados.get("label"),
+                explanation=(dados.get("explanation") or "")[:1000] or None,
+                sync=False,
+            )
+            gravadas += 1
+        except Exception as e:
+            print(f"[phoenix] falha ao gravar avaliação '{nome}': {e}", file=sys.stderr)
+    return gravadas
