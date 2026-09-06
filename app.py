@@ -36,13 +36,12 @@ load_dotenv(ROOT / "agent" / ".env")
 
 # ── Imports do projeto ───────────────────────────────────────────────────────
 from agent.graph.agent import agent_graph
-from agent.graph.state import AgentState
 from agent.logging.postgres import log_execution, count_by_version, compare_versions
 from agent.logging.postgres import check_health as postgres_health
 from agent.logging.phoenix import setup_phoenix_tracing, run_in_phoenix_trace
 from agent.version import AGENT_VERSION
-from eval.runner import build_initial_state, load_expected_paths, run_single
-from eval.assertions.trajectory import assert_trajectory
+from eval.runner import build_initial_state
+from eval.assertions.trajectory import classificar_erro
 from langgraph.types import Command
 
 # ── Observabilidade ──────────────────────────────────────────────────────────
@@ -57,6 +56,11 @@ def _init_tracing() -> bool:
 CASES_PATH = ROOT / "agent-input" / "cases.json"
 RESULTS_TRAIN_PATH = ROOT / "eval" / "results-train.json"
 RESULTS_TEST_PATH = ROOT / "eval" / "results-test.json"
+
+
+def _caminho_resultados(split: str):
+    """Arquivo de resultados de cada split. `all` é o único que foge do padrão."""
+    return ROOT / "eval" / ("results.json" if split == "all" else f"results-{split}.json")
 
 MODALITY_COLORS = {
     "CTX": "#3b82f6",   # blue
@@ -327,13 +331,29 @@ def check_phoenix_health() -> Dict[str, Any]:
 
 
 def check_llm_config() -> Dict[str, Any]:
-    """Verifica credenciais e modelo do LLM."""
-    key = os.getenv("OPENAI_API_KEY", "")
-    model = os.getenv("OPENAI_MODEL", "llama-3.3-70b-versatile")
-    base_url = os.getenv("OPENAI_BASE_URL", "")
-    has_key = bool(key and key != "coloque_sua_chave_gratuita_aqui")
-    provider = "Groq" if "groq" in base_url.lower() else ("OpenRouter" if "openrouter" in base_url.lower() else "OpenAI")
-    return {"configured": has_key, "model": model, "provider": provider}
+    """Descreve a cadeia de provedores, não só o primeiro.
+
+    Ler as variáveis de ambiente direto mostrava apenas o provedor principal — a
+    interface diria "Groq" mesmo depois de a chamada ter caído no fallback.
+    """
+    from agent.llm import descrever_provedores, juiz_independente
+    try:
+        cadeia = descrever_provedores("agente")
+        juiz = descrever_provedores("juiz")
+    except Exception:
+        cadeia, juiz = [], []
+
+    principal = cadeia[0] if cadeia else ""
+    provedor, _, modelo = principal.partition(":")
+    return {
+        "configured": bool(cadeia),
+        "model": modelo or "—",
+        "provider": provedor or "—",
+        "cadeia": cadeia,
+        "fallbacks": max(len(cadeia) - 1, 0),
+        "juiz": juiz[0] if juiz else "—",
+        "juiz_independente": juiz_independente(),
+    }
 
 
 # ── Carregamento de Dados ────────────────────────────────────────────────────
@@ -449,7 +469,15 @@ def render_header():
         api_badge = f'<span style="background:#1a2332; color:#4ade80; padding:4px 10px; border-radius:16px; font-size:11px; border:1px solid #1e3a2f;">● {api_h["msg"]}</span>' if api_h["online"] else f'<span style="background:#2a1a1a; color:#f87171; padding:4px 10px; border-radius:16px; font-size:11px; border:1px solid #4a1e1e;">● {api_h["msg"]}</span>'
         pg_badge = f'<span style="background:#1a2332; color:#60a5fa; padding:4px 10px; border-radius:16px; font-size:11px; border:1px solid #1e293b;">● {pg_h["msg"]}</span>' if pg_h["online"] else f'<span style="background:#1e1e24; color:#6b7280; padding:4px 10px; border-radius:16px; font-size:11px; border:1px solid #2d3142;">○ {pg_h["msg"]}</span>'
         px_badge = f'<span style="background:#1a2332; color:#c084fc; padding:4px 10px; border-radius:16px; font-size:11px; border:1px solid #3b1e4a;">● {px_h["msg"]}</span>' if px_h["online"] else f'<span style="background:#1e1e24; color:#6b7280; padding:4px 10px; border-radius:16px; font-size:11px; border:1px solid #2d3142;">○ {px_h["msg"]}</span>'
-        llm_badge = f'<span style="background:#1a2332; color:#f59e0b; padding:4px 10px; border-radius:16px; font-size:11px; border:1px solid #3d2e1a;">⚡ LLM: {llm_c["provider"]} ({AGENT_VERSION})</span>'
+        extra = f" +{llm_c['fallbacks']} fallback" if llm_c["fallbacks"] else ""
+        llm_badge = f'<span style="background:#1a2332; color:#f59e0b; padding:4px 10px; border-radius:16px; font-size:11px; border:1px solid #3d2e1a;" title="{" → ".join(llm_c["cadeia"])}">⚡ {llm_c["provider"]}{extra} ({AGENT_VERSION})</span>'
+
+        # Autoavaliação precisa estar visível na tela, não só na documentação:
+        # quando juiz e agente são o mesmo modelo, a nota tende a ser inflada.
+        if llm_c["juiz_independente"]:
+            juiz_badge = f'<span style="background:#1a2332; color:#4ade80; padding:4px 10px; border-radius:16px; font-size:11px; border:1px solid #1e3a2f;" title="{llm_c["juiz"]}">⚖️ juiz independente</span>'
+        else:
+            juiz_badge = '<span style="background:#2a2418; color:#fbbf24; padding:4px 10px; border-radius:16px; font-size:11px; border:1px solid #4a3a1e;" title="Juiz e agente são o mesmo modelo — a nota tende a ser inflada">⚖️ autoavaliação</span>'
 
         st.markdown(f"""
         <div style="display:flex; gap:6px; justify-content:flex-end; align-items:center; flex-wrap:wrap; margin-top:6px;">
@@ -457,6 +485,7 @@ def render_header():
             {pg_badge}
             {px_badge}
             {llm_badge}
+            {juiz_badge}
         </div>
         """, unsafe_allow_html=True)
 
@@ -528,10 +557,10 @@ def render_sidebar(cases: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], str]:
         # 4. Botões de Execução
         st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
 
-        if st.button("▶ Executar Agente", key="btn_run", use_container_width=True):
+        if st.button("▶ Executar Agente", key="btn_run", width="stretch"):
             st.session_state.run_triggered = selected_case["ticket_id"]
 
-        if st.button("🔄 Limpar Cache e Re-executar", key="btn_rerun", use_container_width=True):
+        if st.button("🔄 Limpar Cache e Re-executar", key="btn_rerun", width="stretch"):
             st.session_state.rerun_triggered = selected_case["ticket_id"]
 
         # 5. Estatísticas de Casos
@@ -654,7 +683,7 @@ def render_handoff_support_ticket(case: Dict[str, Any], result: Dict[str, Any]):
             )
         with c2:
             st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-            if st.button("📌 Assumir Chamado", key=f"btn_assign_{ticket_id}", type="primary", use_container_width=True):
+            if st.button("📌 Assumir Chamado", key=f"btn_assign_{ticket_id}", type="primary", width="stretch"):
                 st.session_state[assigned_key] = tech_assigned
                 st.success(f"✅ Chamado atribuído a {tech_assigned.split('(')[0].strip()}!")
                 st.rerun()
@@ -767,6 +796,47 @@ def render_hitl_section(ticket_id: str, result: Dict[str, Any], is_interrupted: 
         """, unsafe_allow_html=True)
 
 
+def _render_ancoragem(result: Dict[str, Any]):
+    """Mostra em que evidência a resposta se apoiou e o que faltou.
+
+    O agente é obrigado a enumerar `evidencias` e `limitacoes` antes de redigir —
+    foi esse andaime que levou a fundamentação de 5,75 para 8,38 no juiz. Sem
+    exibir os dois campos, o operador não consegue conferir se a resposta está
+    de fato ancorada no que a API devolveu.
+    """
+    passo = next((s for s in (result.get("trace") or [])
+                  if isinstance(s, dict) and s.get("node") == "decide"), {})
+    evidencias = result.get("evidencias") or passo.get("evidencias") or []
+    limitacoes = result.get("limitacoes") or passo.get("limitacoes") or []
+    modelo = passo.get("modelo")
+    do_cache = passo.get("from_cache")
+
+    if not (evidencias or limitacoes or modelo):
+        return
+
+    esq, dir_ = st.columns(2)
+    with esq:
+        with st.container(border=True):
+            st.markdown("**Evidências citadas**")
+            if evidencias:
+                for e in evidencias:
+                    st.markdown(f"- {e}")
+            else:
+                st.caption("O modelo não enumerou evidências nesta decisão.")
+    with dir_:
+        with st.container(border=True):
+            st.markdown("**Limitações reconhecidas**")
+            if limitacoes:
+                for l in limitacoes:
+                    st.markdown(f"- {l}")
+            else:
+                st.caption("Nenhuma lacuna declarada.")
+
+    if modelo:
+        origem = "cache de decisões" if do_cache else "chamada nova ao LLM"
+        st.caption(f"Decidido por `{modelo}` · {origem}")
+
+
 def render_response(result: Dict[str, Any], case: Dict[str, Any]):
     """Exibe a resposta formatada do agente para o cliente."""
     decision = result.get("decision")
@@ -782,6 +852,8 @@ def render_response(result: Dict[str, Any], case: Dict[str, Any]):
         <div style="font-size:14px; line-height:1.7; color:#e2e8f0; white-space:pre-wrap;">{response}</div>
     </div>
     """, unsafe_allow_html=True)
+
+    _render_ancoragem(result)
 
     # ⚖️ Botão para avaliar a resposta deste ticket com o Juiz LLM sob demanda
     st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
@@ -811,6 +883,19 @@ def render_response(result: Dict[str, Any], case: Dict[str, Any]):
             jc4.metric("Segurança", f"{je.get('seguranca', 0)}/10")
             jc5.metric("Nota Geral", f"{je.get('nota_geral', 0)}/10")
             st.info(f"**Parecer do Juiz:** {je.get('razao', '—')}", icon="⚖️")
+
+            # Quem julgou importa: se for o mesmo modelo que respondeu, a nota
+            # tende a ser inflada — sobretudo no eixo de honestidade.
+            modelo_juiz = je.get("modelo_juiz") or "—"
+            if je.get("juiz_independente"):
+                st.caption(f"Julgado por `{modelo_juiz}` — provedor independente do agente.")
+            else:
+                st.warning(
+                    f"Julgado por `{modelo_juiz}`, **o mesmo modelo que respondeu**. "
+                    "Autoavaliação tende a inflar a nota, sobretudo em honestidade. "
+                    "Configure `JUDGE_*` no `agent/.env` para separar.",
+                    icon="⚠️",
+                )
 
 
 def tab_diagnostico(case: Dict[str, Any], result: Optional[Dict[str, Any]], elapsed: Optional[float], is_interrupted: bool):
@@ -1063,7 +1148,7 @@ def render_technical_signals(raw: Dict[str, Any]):
                     df_rms["Limiar de Alarme"] = float(threshold)
 
                 st.markdown(f"<b>📈 Série Temporal RMS ({rms_data.get('unit', 'mm/s')})</b>", unsafe_allow_html=True)
-                st.line_chart(df_rms, use_container_width=True)
+                st.line_chart(df_rms, width="stretch")
         else:
             st.markdown("""
             <div class="tractian-card" style="text-align:center; padding:30px; color:#8892a0;">
@@ -1091,7 +1176,7 @@ def render_technical_signals(raw: Dict[str, Any]):
             if "freq_hz" in df_peaks.columns and "amplitude_mm_s" in df_peaks.columns:
                 df_peaks = df_peaks.sort_values("freq_hz")
                 st.markdown("<b>📊 Espectro de Frequência FFT (Picos)</b>", unsafe_allow_html=True)
-                st.bar_chart(df_peaks.set_index("freq_hz")["amplitude_mm_s"], use_container_width=True)
+                st.bar_chart(df_peaks.set_index("freq_hz")["amplitude_mm_s"], width="stretch")
         else:
             st.markdown("""
             <div class="tractian-card" style="text-align:center; padding:30px; color:#8892a0;">
@@ -1155,17 +1240,24 @@ def tab_metricas():
     with sub_t1:
         col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1.5, 1.5, 2])
         with col_ctrl1:
-            split_choice = st.selectbox("Conjunto de Avaliação", options=["train", "test", "all"], index=0)
+            split_choice = st.selectbox(
+                "Conjunto de Avaliação",
+                options=["train", "test", "derivados", "all"],
+                index=0,
+                help="`derivados` são cenários construídos neste projeto, sobre ativos que o "
+                     "case original não usa. Reporte SEMPRE separado — um gabarito escrito por "
+                     "quem escreveu o agente pode favorecê-lo sem intenção.",
+            )
         with col_ctrl2:
             use_judge = st.checkbox("Executar Juiz LLM", value=False, help="Avalia qualidade e segurança da resposta com LLM.")
         with col_ctrl3:
             st.markdown("<div style='margin-top:24px;'></div>", unsafe_allow_html=True)
-            if st.button("🚀 Executar Avaliação Batch", key="btn_run_eval_tab", use_container_width=True):
+            if st.button("🚀 Executar Avaliação Batch", key="btn_run_eval_tab", width="stretch"):
                 from eval.runner import run_all
                 with st.spinner(f"Executando avaliação no split '{split_choice}'..."):
                     try:
                         out = run_all(split=split_choice, run_judge=use_judge)
-                        out_path = RESULTS_TRAIN_PATH if split_choice == "train" else (RESULTS_TEST_PATH if split_choice == "test" else ROOT / "eval" / "results.json")
+                        out_path = _caminho_resultados(split_choice)
                         out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
                         st.success("✅ Avaliação finalizada e salva com sucesso!")
                         st.rerun()
@@ -1173,23 +1265,38 @@ def tab_metricas():
                         st.error(f"❌ Erro ao rodar avaliação: {e}")
 
         # Carrega arquivo de resultados existente
-        target_path = RESULTS_TRAIN_PATH if split_choice == "train" else (RESULTS_TEST_PATH if split_choice == "test" else ROOT / "eval" / "results.json")
+        target_path = _caminho_resultados(split_choice)
         if target_path.exists():
             eval_data = json.loads(target_path.read_text(encoding="utf-8"))
             summary = eval_data.get("summary", {})
             results = eval_data.get("results", [])
 
             # Métricas agregadas
-            cols = st.columns(4)
+            cols = st.columns(5)
             traj_avg = summary.get("trajectory_avg_score", 0.0)
             judge_avg = summary.get("judge_avg_score", 0.0)
             decisions = summary.get("decisions", {})
+            acc = summary.get("decision_accuracy")
+            hits = summary.get("decision_hits", "—")
+            conserv = summary.get("erros_conservadores")
+            arrisc = summary.get("erros_arriscados")
 
+            # A ACURÁCIA vem primeiro. O `trajectory_avg_score` era o destaque e
+            # é justamente a métrica que engana: 2 dos 4 pontos eram grátis, e ela
+            # marcava 0,74 enquanto a acurácia real era 31%.
             metrics = [
-                ("Total Casos", summary.get("total", 0), "#e2e8f0"),
-                ("Score Trajetória", f"{traj_avg:.2f}", "#3b82f6" if traj_avg >= 0.8 else "#f59e0b"),
-                ("Nota Juiz LLM", f"{judge_avg:.1f}/10" if judge_avg else "—", "#22c55e" if judge_avg >= 7.0 else "#8892a0"),
-                ("Distribuição", f"Orient: {decisions.get('orient',0)} | Act: {decisions.get('act',0)} | Esc: {decisions.get('escalate',0)}", "#f59e0b"),
+                ("Acurácia de Decisão",
+                 f"{acc:.0%} ({hits})" if isinstance(acc, (int, float)) else "—",
+                 "#22c55e" if isinstance(acc, (int, float)) and acc >= 0.75 else "#f59e0b"),
+                ("Erros Arriscados",
+                 arrisc if arrisc is not None else "—",
+                 "#22c55e" if arrisc == 0 else "#f87171"),
+                ("Erros Conservadores", conserv if conserv is not None else "—", "#60a5fa"),
+                ("Nota Juiz LLM", f"{judge_avg:.1f}/10" if judge_avg else "—",
+                 "#22c55e" if judge_avg >= 7.0 else "#8892a0"),
+                ("Distribuição",
+                 f"Orient {decisions.get('orient',0)} · Act {decisions.get('act',0)} · Esc {decisions.get('escalate',0)}",
+                 "#f59e0b"),
             ]
             for col, (label, val, color) in zip(cols, metrics):
                 with col:
@@ -1203,19 +1310,30 @@ def tab_metricas():
             # Tabela de resultados individuais
             table_rows = []
             for r in results:
+                traj = r.get("trajectory") if isinstance(r.get("trajectory"), dict) else {}
+                juiz = r.get("judge") if isinstance(r.get("judge"), dict) else {}
+                esperado = r.get("expected_decision")
+                tipo = classificar_erro(esperado, r.get("decision"))
+                # Um erro conservador e um arriscado não custam igual num agente
+                # industrial — a tabela precisa distinguir os dois.
+                veredicto = "✅ acerto" if esperado and not tipo else (
+                    {"conservador": "🟦 conservador", "arriscado": "🟥 arriscado"}.get(tipo, "—"))
+                modelo = next(
+                    (s.get("modelo") for s in (r.get("trace") or [])
+                     if isinstance(s, dict) and s.get("node") == "decide" and s.get("modelo")), "—")
+
                 table_rows.append({
                     "Ticket": r.get("ticket_id", "—"),
+                    "Esperado": esperado or "—",
                     "Decisão": f"{DECISION_ICONS.get(r.get('decision'), '⚪')} {r.get('decision', '—')}",
+                    "Veredicto": veredicto,
                     "Qualidade": f"{QUALITY_ICONS.get(r.get('quality_verdict'), '⚪')} {r.get('quality_verdict', '—')}",
-                    "Trajetória Score": r.get("trajectory", {}).get("score", "—") if isinstance(r.get("trajectory"), dict) else "—",
-                    "Nota Juiz": r.get("judge", {}).get("nota_geral", "—") if isinstance(r.get("judge"), dict) else "—",
+                    "Trajetória": traj.get("score", "—"),
+                    "Nota Juiz": juiz.get("nota_geral", "—"),
+                    "Modelo": modelo,
                 })
 
-            st.dataframe(
-                pd.DataFrame(table_rows),
-                use_container_width=True,
-                hide_index=True,
-            )
+            st.dataframe(pd.DataFrame(table_rows), width="stretch", hide_index=True)
         else:
             st.info(f"Nenhum resultado de avaliação salvo para o split '{split_choice}'. Clique no botão acima para rodar.")
 
@@ -1235,7 +1353,7 @@ def tab_metricas():
                     v_b = c2.selectbox("Versão B", options=v_list, index=1 if len(v_list) > 1 else 0)
                     comp_rows = compare_versions(v_a, v_b)
                     if comp_rows:
-                        st.dataframe(pd.DataFrame(comp_rows), use_container_width=True)
+                        st.dataframe(pd.DataFrame(comp_rows), width="stretch")
             else:
                 st.info("Tabela `execucoes` conectada, mas ainda sem registros gravados. Execute tickets para registrar.")
         else:

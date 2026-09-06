@@ -640,7 +640,9 @@ def decide(state: AgentState) -> dict:
             "action_target": action_target,
             "trace": [{"node": "decide", "decision": cached.decision,
                        "action": action_type, "from_cache": True,
-                       "modelo": modelo_cache}],
+                       "modelo": modelo_cache,
+                       "evidencias": cached.evidencias,
+                       "limitacoes": cached.limitacoes}],
         }
 
     # include_raw devolve tambem a resposta bruta, de onde sai o modelo real.
@@ -676,7 +678,11 @@ def decide(state: AgentState) -> dict:
         "action_target": action_target,
         "trace": [{"node": "decide", "decision": result.decision,
                    "action": action_type, "from_cache": False,
-                   "modelo": modelo}],
+                   "modelo": modelo,
+                   # No trace, não só no span: é o que permite a interface mostrar
+                   # em que o agente se apoiou e o que ele reconheceu que faltou.
+                   "evidencias": result.evidencias,
+                   "limitacoes": result.limitacoes}],
     }
 
 

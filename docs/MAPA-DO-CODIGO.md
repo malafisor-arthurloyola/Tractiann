@@ -155,6 +155,106 @@ compensatória. Os `overrides` de `data/seed.json` fixam os cenários desenhados
 
 ---
 
+## As 18 tools e quem as usa
+
+O servidor expõe as 18 operações da API. O grafo alcança 14.
+
+| tool | verbo | endpoint | papel no grafo |
+| :--- | :--- | :--- | :--- |
+| `getAsset` | GET | `/assets/{id}` | núcleo |
+| `getBaseline` | GET | `/assets/{id}/baseline` | núcleo |
+| `listAnalyses` | GET | `/assets/{id}/analyses` | núcleo |
+| `getRmsSeries` | GET | `/assets/{id}/rms` | núcleo |
+| `getSpectrum` | GET | `/assets/{id}/spectrum` | núcleo |
+| `getDataQuality` | GET | `/assets/{id}/data-quality` | núcleo |
+| `getModel` | GET | `/models/{id}` | compensatória |
+| `searchKnowledge` | GET | `/knowledge/search` | compensatória |
+| `getAnalysis` | GET | `/analyses/{id}` | compensatória |
+| `reprocessAnalysis` | POST | `/analyses/{id}/reprocess` | ação · `action_low` |
+| `requestSpecialistAnalysis` | POST | `/analyses/{id}/request-specialist` | ação · `action_low` |
+| `requestRetraining` | POST | `/models/{id}/request-retraining` | ação · `action_high` |
+| `updateAssetConfig` | PATCH | `/assets/{id}` | ação · `action_high` |
+| `escalateCase` | POST | `/cases/{id}/escalate` | ação · `escalate` |
+| `getCompany` | GET | `/companies/{id}` | *não usada* |
+| `listAssetsByCompany` | GET | `/companies/{id}/assets` | *não usada* |
+| `getCurrentUser` | GET | `/users/me` | *não usada* |
+| `getKnowledgeDoc` | GET | `/knowledge/{id}` | *não usada* |
+
+As quatro não usadas existem para cumprir o contrato das 18 operações. O agente não precisou
+delas: empresa e usuário já chegam no ticket, e `searchKnowledge` devolve o suficiente sem
+buscar o documento inteiro.
+
+### O que o `investigate` busca
+
+**Primeira passada** — as 6 do núcleo, sem condicional, porque ainda não se sabe o que vai
+faltar. O `asset_info` está aí porque sem ele o espectro é ininterpretável: as frequências
+características (`bpfo_hz`, `bpfi_hz`, `bsf_hz`, `ftf_hz`, `line_frequency_hz`) e o
+`rotation_rpm` moram no ativo. Um pico em 200 Hz não diz nada até se saber que 200 Hz é 1× a
+rotação daquela máquina.
+
+**Passadas seguintes** — uma tool só, a que o `quality_check` indicou em `next_tool`.
+`MAX_RETRIES = 3` limita a três rodadas extras, então uma execução faz no máximo **9 chamadas
+de leitura**.
+
+### Mapa de compensação
+
+Quando uma categoria vem vazia ou degradada, o que buscar no lugar:
+
+| categoria que falhou | tenta, nesta ordem | por quê a primeira |
+| :--- | :--- | :--- |
+| `baseline` | `model`, `asset_info`, `knowledge` | `coverage[].can_learn_baseline` diz se aquele tipo de máquina *sequer aprende* baseline |
+| `analyses` | `analysis_detail`, `model`, `knowledge` | a lista pode vir `partial` enquanto o detalhe de uma análise vem completo |
+| `rms` | `analyses`, `data_quality`, `knowledge` | se não dá para ver a série, talvez uma análise já tenha diagnosticado a tendência |
+| `spectrum` | `asset_info`, `analysis_detail` | sem o espectro, as frequências características ao menos contextualizam |
+| `data_quality` | `asset_info`, `knowledge` | `sensor_status` explica boa parte da falta de dado |
+| `asset_info` | `knowledge` | último recurso |
+
+`_next_compensation()` percorre as categorias com problema em ordem de criticidade e devolve a
+primeira compensação **ainda não tentada**.
+
+### Da decisão à ação
+
+| `action_type` | tool MCP | parâmetro | permissão exigida |
+| :--- | :--- | :--- | :--- |
+| `reprocess` | `reprocessAnalysis` | `analysisId` | `action_low` |
+| `specialist` | `requestSpecialistAnalysis` | `analysisId` | `action_low` |
+| `retrain` | `requestRetraining` | `modelId` | `action_high` |
+| `update_config` | `updateAssetConfig` | `assetId` | `action_high` |
+| `escalate` | `escalateCase` | `caseId` | `escalate` |
+
+Três coisas acontecem antes de qualquer mutação disparar:
+
+1. **O alvo é validado** (`_validate_action`). O LLM pode citar um id inexistente; o alvo é
+   conferido contra os ids que de fato apareceram na evidência. Sem alvo válido, a ação é
+   cancelada.
+2. **Confirmação humana** (`interrupt()` do LangGraph). O grafo pausa e só segue depois da
+   confirmação na interface. Cancelar transforma a decisão em `escalate`.
+3. **Erro HTTP vira envelope**, não exceção — um 403 por falta de permissão é resposta
+   legítima da API.
+
+O `escalate` **não** passa por confirmação: escalar é a ação segura. O `interrupt()` existe
+para mutações de impacto, não para pedir ajuda.
+
+### O caminho completo de uma chamada
+
+```
+nodes.py       call_tool("getBaseline", assetId="asset_S420")
+                    ↓  função Python, síncrona
+mcp_client.py  serializa em JSON-RPC, escreve no stdin do subprocesso
+                    ↓  protocolo MCP sobre stdio
+mcp_server.py  @mcp.tool() getBaseline(assetId) → tractian_request(...)
+                    ↓
+client.py      GET http://localhost:8000/assets/asset_S420/baseline
+                    ↓
+API :8000      {"mode": "complete", "notes": null, "data": {...}}
+```
+
+O agente conhece **nomes de tool e de parâmetro**. Não conhece HTTP, porta, nem path. Essa é a
+fronteira: versionar a API mexe só no `client.py`; trocar de framework de agente não reescreve
+tool nenhuma.
+
+---
+
 ## Por onde começar, dependendo do que você quer
 
 | quero… | abra |

@@ -48,43 +48,52 @@ de dado vazias. A versão entregue acerta menos e nunca erra desse jeito.
 
 ```mermaid
 flowchart LR
-    T(["ticket"]) --> INV["investigate"]
-    INV --> QC{"quality_check"}
-    QC -- "evidência compensatória<br/>outro endpoint, nunca o mesmo GET" --> INV
-    QC --> DEC["decide"]
+    T(["ticket"]) --> INV["investigate<br/><small>getAsset · getBaseline · listAnalyses<br/>getRmsSeries · getSpectrum · getDataQuality</small>"]
+    INV --> QC{"quality_check<br/><small>classifica a evidência</small>"}
+    QC -- "compensação<br/>getModel · searchKnowledge · getAnalysis" --> INV
+    QC --> DEC["decide<br/><small>saída estruturada</small>"]
 
-    DEC --> ORI["orientar"]
-    DEC -- "confirmação humana antes" --> ACT["agir"]
-    DEC --> ESC["escalar"]
+    DEC --> ORI["orientar<br/><small>nenhuma tool</small>"]
+    DEC --> VAL{"valida o alvo<br/><small>id existe na evidência?</small>"}
+    VAL -- "sem alvo válido" --> ORI
+    VAL -- "alvo válido" --> HIT{{"confirmação humana<br/>interrupt()"}}
+    HIT -- "cancelou" --> ESC
+    HIT -- "confirmou" --> ACT["agir<br/><small>reprocessAnalysis · requestSpecialistAnalysis<br/>requestRetraining · updateAssetConfig</small>"]
+    DEC --> ESC["escalar<br/><small>escalateCase</small>"]
 
     subgraph MCP["camada MCP - ADR-0001"]
         direction LR
         MC["mcp_client"] -- "stdio" --> MS["mcp_server<br/>18 tools"]
     end
 
-    INV == "6 tools de leitura<br/>+ até 3 compensatórias" ==> MC
-    MS -- "HTTP" --> API[("API industrial<br/>:8000")]
-    ACT -. "1 tool de mutação" .-> MC
-    ESC -. "1 tool de mutação" .-> MC
+    INV == "6 do núcleo<br/>+ até 3 compensatórias" ==> MC
+    ACT -. "1 mutação" .-> MC
+    ESC -. "1 mutação" .-> MC
+    MS -- "HTTP · erro vira envelope,<br/>não exceção" --> API[("API industrial<br/>:8000")]
 
     DEC -. "fallback automático" .-> LLM["omniroute → openrouter → groq"]
-
     INV -. "spans" .-> PHX[("Phoenix<br/>:6006")]
     DEC -. "spans" .-> PHX
     DEC -. "execução" .-> PG[("Postgres<br/>:5432")]
     PHX -. "traces" .-> PG
 
     classDef saida fill:#e8f2fd,stroke:#1f6fd0,color:#0d1418
+    classDef guarda fill:#fdf0e8,stroke:#d2551f,color:#0d1418
     classDef obs fill:#f1f3f4,stroke:#73828a,color:#0d1418
     class ORI,ACT,ESC saida
+    class VAL,HIT guarda
     class PHX,PG,LLM obs
 ```
 
 Os nós do grafo **não conhecem URL**: pedem uma tool pelo nome e a camada MCP resolve.
 
 A seta grossa é o volume real: **a investigação é a maior consumidora do MCP** — 6 tools de
-leitura na primeira passada, mais até 3 compensatórias. `agir` e `escalar` usam uma tool cada,
-no fim. Toda ida à API atravessa a mesma camada, seja para ler ou para mudar estado.
+leitura na primeira passada, mais até 3 compensatórias. `agir` e `escalar` usam uma tool cada.
+
+Em laranja, os três guarda-corpos antes de qualquer mutação: **o alvo é validado** contra os
+ids que apareceram na evidência (sem alvo, a ação vira orientação), **um humano confirma**, e
+**erro HTTP volta como envelope** — um 403 por falta de permissão é resposta legítima da API,
+não exceção. `escalar` não passa por confirmação: é a ação segura.
 
 Três decisões que governam o comportamento:
 
