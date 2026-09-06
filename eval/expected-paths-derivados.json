@@ -1,0 +1,78 @@
+[
+  {
+    "id": "case_der_01",
+    "ticket_id": "DER-01",
+    "root_question": "Explicar que `baseline established` é um estado do aprendizado, não um laudo de saúde do ativo.",
+    "mode": "complete",
+    "derivacao": "Pergunta conceitual, sem pedido de ação. Todos os envelopes do asset_M428 são `complete`, então não há lacuna que justifique escalonamento. Regra: pergunta pede explicação -> orient.",
+    "expected_path": [
+      { "step": "GET /assets/asset_M428", "note": "motor_induction, sensor online" },
+      { "step": "GET /assets/asset_M428/baseline", "note": "state=established" },
+      { "step": "GET /knowledge/search?q=baseline", "note": "material de apoio para a explicação" }
+    ]
+  },
+  {
+    "id": "case_der_02",
+    "ticket_id": "DER-02",
+    "root_question": "Por que não há análises novas, se o sensor está online?",
+    "mode": "unavailable",
+    "derivacao": "Pergunta diagnóstica. `analyses` e `data_quality` do asset_R310 vêm vazios, mas o `processing_state=delayed` do modelo explica a ausência — há resposta honesta sem precisar de humano. Regra: pergunta com evidência suficiente -> orient.",
+    "expected_path": [
+      { "step": "GET /assets/asset_R310/analyses", "note": "mode=unavailable" },
+      { "step": "GET /assets/asset_R310/data-quality", "note": "mode=unavailable" },
+      { "step": "GET /models/mdl_vib_v3", "note": "processing_state=delayed — explica a ausência" },
+      { "step": "GET /assets/asset_R310/baseline", "note": "state disponível, sensor online" }
+    ]
+  },
+  {
+    "id": "case_der_03",
+    "ticket_id": "DER-03",
+    "root_question": "Reprocessar a análise após intervenção física, com justificativa.",
+    "mode": "complete",
+    "derivacao": "O cliente pede a ação explicitamente e relata intervenção física concluída. Existe alvo válido (an_9914) e o usr_lucas tem permissão `action_low`. Regra: pedido explícito + alvo válido + evidência sustenta -> act.",
+    "expected_path": [
+      { "step": "GET /assets/asset_C210/analyses", "note": "an_9914 disponível" },
+      { "step": "GET /assets/asset_C210/baseline", "note": "mode=unavailable — reforça a necessidade de reprocessar" },
+      { "step": "POST /analyses/an_9914/reprocess", "note": "justificativa: alinhamento executado" }
+    ]
+  },
+  {
+    "id": "case_der_04",
+    "ticket_id": "DER-04",
+    "root_question": "Solicitar análise especialista, com contexto do conflito entre fontes.",
+    "mode": "conflict",
+    "derivacao": "O cliente pede parecer especializado. Existe alvo (an_9919) e o usr_sofia tem `action_low`. O baseline e a qualidade de dados vêm em `conflict`, o que fundamenta o pedido em vez de invalidá-lo. Regra: pedido explícito + alvo válido -> act.",
+    "expected_path": [
+      { "step": "GET /assets/asset_G715/analyses", "note": "an_9919 disponível" },
+      { "step": "GET /assets/asset_G715/baseline", "note": "mode=conflict — fontes divergem" },
+      { "step": "GET /assets/asset_G715/data-quality", "note": "mode=conflict" },
+      { "step": "POST /analyses/an_9919/request-specialist", "note": "justificativa: divergência entre fontes" }
+    ]
+  },
+  {
+    "id": "case_der_05",
+    "ticket_id": "DER-05",
+    "root_question": "Falha física consumada com pedido explícito de presença em campo.",
+    "mode": "inconclusive",
+    "derivacao": "O equipamento parou a linha e o cliente pede presença física — fora do alcance do suporte remoto. O RMS vem `inconclusive`, então não há evidência para diagnosticar à distância. A usr_ana tem permissão `escalate`. Regra: pedido de intervenção humana + falha consumada -> escalate.",
+    "expected_path": [
+      { "step": "GET /assets/asset_F115", "note": "fan, sensor online" },
+      { "step": "GET /assets/asset_F115/rms", "note": "mode=inconclusive" },
+      { "step": "GET /assets/asset_F115/data-quality", "note": "mode=partial" },
+      { "step": "POST /cases/case_der_05/escalate", "note": "justificativa: parada de linha, exige campo" }
+    ]
+  },
+  {
+    "id": "case_der_06",
+    "ticket_id": "DER-06",
+    "root_question": "Parada preventiva com pedido de análise presencial antes de religar.",
+    "mode": "unavailable",
+    "derivacao": "O cliente pede análise presencial e o ativo está parado aguardando liberação. `analyses` e `data_quality` vêm vazios — não há evidência para autorizar religamento remotamente. A usr_helena tem permissão `escalate`. Regra: pedido de intervenção humana + evidência crítica ausente -> escalate.",
+    "expected_path": [
+      { "step": "GET /assets/asset_R310", "note": "mill, sensor online" },
+      { "step": "GET /assets/asset_R310/analyses", "note": "mode=unavailable" },
+      { "step": "GET /assets/asset_R310/data-quality", "note": "mode=unavailable" },
+      { "step": "POST /cases/case_der_06/escalate", "note": "justificativa: liberação exige inspeção física" }
+    ]
+  }
+]

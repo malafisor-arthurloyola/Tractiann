@@ -25,6 +25,16 @@ ausente:
     LLM_FALLBACK_2_MODEL=...
 
 Sem nenhum `LLM_FALLBACK_*`, o comportamento é idêntico ao de antes.
+
+## Juiz independente
+
+O juiz LLM tem um namespace próprio, opcional. Definindo `JUDGE_API_KEY`,
+`JUDGE_BASE_URL` e `JUDGE_MODEL`, quem avalia deixa de ser o mesmo modelo que
+responde — autoavaliação infla nota, e um modelo tende a achar boa a resposta
+que ele mesmo escreveria. Os fallbacks do juiz seguem o mesmo padrão numerado
+(`JUDGE_FALLBACK_1_*`).
+
+Sem `JUDGE_API_KEY`, o juiz usa a cadeia do agente, como antes.
 """
 import os
 from pathlib import Path
@@ -44,30 +54,51 @@ _MAX_FALLBACKS = 5
 _METODO_PADRAO = os.getenv("LLM_STRUCTURED_METHOD", "function_calling")
 
 
-def _provedores() -> list[dict]:
-    """Lista ordenada de provedores: o principal e depois os fallbacks."""
+# Namespaces de configuração: (prefixo do principal, prefixo dos fallbacks).
+_NAMESPACES = {
+    "agente": ("OPENAI", "LLM_FALLBACK"),
+    "juiz": ("JUDGE", "JUDGE_FALLBACK"),
+}
+
+
+def _provedores(papel: str = "agente") -> list[dict]:
+    """Lista ordenada de provedores para um papel: principal e depois fallbacks.
+
+    O papel `juiz` cai para a cadeia do agente quando não está configurado —
+    assim o comportamento antigo continua valendo sem nenhuma variável nova.
+    """
+    principal, fallback = _NAMESPACES.get(papel, _NAMESPACES["agente"])
+
+    if papel != "agente" and not os.getenv(f"{principal}_API_KEY"):
+        return _provedores("agente")
+
     provedores = [{
-        "nome": _rotular(os.getenv("OPENAI_BASE_URL", "")),
-        "api_key": os.getenv("OPENAI_API_KEY", ""),
-        "base_url": os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
-        "model": os.getenv("OPENAI_MODEL", "openai/gpt-oss-20b"),
-        "metodo": os.getenv("OPENAI_STRUCTURED_METHOD", _METODO_PADRAO),
+        "nome": _rotular(os.getenv(f"{principal}_BASE_URL", "")),
+        "api_key": os.getenv(f"{principal}_API_KEY", ""),
+        "base_url": os.getenv(f"{principal}_BASE_URL", "https://api.groq.com/openai/v1"),
+        "model": os.getenv(f"{principal}_MODEL", "openai/gpt-oss-20b"),
+        "metodo": os.getenv(f"{principal}_STRUCTURED_METHOD", _METODO_PADRAO),
     }]
 
     for i in range(1, _MAX_FALLBACKS + 1):
-        chave = os.getenv(f"LLM_FALLBACK_{i}_API_KEY")
+        chave = os.getenv(f"{fallback}_{i}_API_KEY")
         if not chave:
             break  # numeração é contígua: o primeiro buraco encerra
-        base_url = os.getenv(f"LLM_FALLBACK_{i}_BASE_URL", "")
+        base_url = os.getenv(f"{fallback}_{i}_BASE_URL", "")
         provedores.append({
             "nome": _rotular(base_url),
             "api_key": chave,
             "base_url": base_url,
-            "model": os.getenv(f"LLM_FALLBACK_{i}_MODEL", ""),
-            "metodo": os.getenv(f"LLM_FALLBACK_{i}_STRUCTURED_METHOD", _METODO_PADRAO),
+            "model": os.getenv(f"{fallback}_{i}_MODEL", ""),
+            "metodo": os.getenv(f"{fallback}_{i}_STRUCTURED_METHOD", _METODO_PADRAO),
         })
 
     return [p for p in provedores if p["api_key"] and p["base_url"] and p["model"]]
+
+
+def juiz_independente() -> bool:
+    """True quando o juiz roda num provedor próprio, separado do agente."""
+    return bool(os.getenv("JUDGE_API_KEY"))
 
 
 def _rotular(base_url: str) -> str:
@@ -84,9 +115,9 @@ def _rotular(base_url: str) -> str:
     return u.split("//")[-1].split("/")[0]
 
 
-def descrever_provedores() -> list[str]:
+def descrever_provedores(papel: str = "agente") -> list[str]:
     """`['groq:openai/gpt-oss-20b', 'openrouter:...']` — para a UI e o log."""
-    return [f"{p['nome']}:{p['model']}" for p in _provedores()]
+    return [f"{p['nome']}:{p['model']}" for p in _provedores(papel)]
 
 
 def modelo_efetivo(mensagem) -> str | None:
@@ -110,7 +141,8 @@ def modelo_efetivo(mensagem) -> str | None:
     return None
 
 
-def build_llm(temperature: float = 0.3, structured_output=None, include_raw: bool = False):
+def build_llm(temperature: float = 0.3, structured_output=None, include_raw: bool = False,
+              papel: str = "agente"):
     """LLM pronto para uso, com fallback automático entre provedores.
 
     Args:
@@ -121,6 +153,8 @@ def build_llm(temperature: float = 0.3, structured_output=None, include_raw: boo
         include_raw: devolve `{"raw", "parsed", "parsing_error"}` em vez do
             objeto. Necessário para ler qual modelo respondeu — o objeto
             estruturado sozinho descarta os metadados da resposta.
+        papel: `"agente"` ou `"juiz"`. O juiz pode ter provedor próprio, para
+            que quem avalia não seja o mesmo modelo que responde.
 
     Returns:
         Runnable do LangChain. Com um só provedor configurado, é o próprio
@@ -129,7 +163,7 @@ def build_llm(temperature: float = 0.3, structured_output=None, include_raw: boo
     Raises:
         RuntimeError: se nenhum provedor estiver configurado.
     """
-    provedores = _provedores()
+    provedores = _provedores(papel)
     if not provedores:
         raise RuntimeError(
             "Nenhum provedor de LLM configurado. Defina OPENAI_API_KEY, "

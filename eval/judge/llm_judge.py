@@ -5,6 +5,12 @@ mede *se o agente fez a coisa certa*. O juiz mede *se explicou bem* — honestid
 sobre lacunas, clareza para o cliente, fundamentação na evidência e adequação do
 risco da ação.
 
+> **Independência.** Quando `JUDGE_API_KEY` está definido, o juiz roda num
+> provedor próprio, separado do agente. Sem isso, quem avalia é o mesmo modelo
+> que respondeu — autoavaliação, que tende a inflar nota porque o modelo acha boa
+> justamente a resposta que ele mesmo escreveria. O campo `juiz_independente` no
+> retorno registra qual dos dois casos valeu naquela execução.
+
 Duas coisas importam para a nota não colapsar no meio da escala:
   1. **Âncoras de calibração** — o que é 0, 5 e 10 em cada critério. Sem elas o
      modelo distribui tudo em 7-8 e a métrica não separa nada.
@@ -18,7 +24,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from agent.llm import build_llm, modelo_efetivo
+from agent.llm import build_llm, juiz_independente, modelo_efetivo
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / "agent" / ".env")
 
@@ -102,7 +108,8 @@ def judge_response(
     Returns:
         dict com as notas (0-10), nota_geral e razao
     """
-    llm = build_llm(temperature=0.1, structured_output=JudgeVerdict, include_raw=True)
+    llm = build_llm(temperature=0.1, structured_output=JudgeVerdict,
+                    include_raw=True, papel="juiz")
 
     prompt = JUDGE_PROMPT.format(
         ticket=ticket,
@@ -128,4 +135,10 @@ def judge_response(
         raise RuntimeError(f"juiz não produziu veredicto válido: {bruto.get('parsing_error')}")
     # Qual modelo julgou importa tanto quanto qual decidiu: um roteador pode
     # servir juízes diferentes para tickets diferentes.
-    return {**verdict.model_dump(), "modelo_juiz": modelo_efetivo(bruto.get("raw"))}
+    return {
+        **verdict.model_dump(),
+        "modelo_juiz": modelo_efetivo(bruto.get("raw")),
+        # Registrado por execução: sem isso não dá para saber, olhando o
+        # resultado depois, se aquela nota veio de autoavaliação.
+        "juiz_independente": juiz_independente(),
+    }

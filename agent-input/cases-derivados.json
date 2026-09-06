@@ -1,0 +1,50 @@
+[
+  {
+    "id": "case_der_01",
+    "ticket_id": "DER-01",
+    "company_id": "comp_acme",
+    "user_id": "usr_bruno",
+    "asset_id": "asset_M428",
+    "message": "Vi no relatório que o baseline do motor está 'established'. Isso quer dizer que a máquina está boa? Fiquei na dúvida se é um diagnóstico ou só um status do sistema."
+  },
+  {
+    "id": "case_der_02",
+    "ticket_id": "DER-02",
+    "company_id": "comp_papel_sul",
+    "user_id": "usr_marta",
+    "asset_id": "asset_R310",
+    "message": "Faz uma semana que não aparece nenhuma análise nova desse moinho. Parou de monitorar? O sensor está online."
+  },
+  {
+    "id": "case_der_03",
+    "ticket_id": "DER-03",
+    "company_id": "comp_aurora",
+    "user_id": "usr_lucas",
+    "asset_id": "asset_C210",
+    "message": "Fizemos o alinhamento do compressor ontem à tarde. Reprocessa a análise pra ver se o quadro mudou."
+  },
+  {
+    "id": "case_der_04",
+    "ticket_id": "DER-04",
+    "company_id": "comp_petro_delta",
+    "user_id": "usr_sofia",
+    "asset_id": "asset_G715",
+    "message": "Esse motor está com um comportamento que não bate com o diagnóstico do sistema. Quero que um especialista da Tractian olhe o caso."
+  },
+  {
+    "id": "case_der_05",
+    "ticket_id": "DER-05",
+    "company_id": "comp_forja_br",
+    "user_id": "usr_ana",
+    "asset_id": "asset_F115",
+    "message": "O ventilador travou e parou a linha de produção. Preciso de alguém aqui hoje, isso não dá pra resolver por telefone."
+  },
+  {
+    "id": "case_der_06",
+    "ticket_id": "DER-06",
+    "company_id": "comp_papel_sul",
+    "user_id": "usr_helena",
+    "asset_id": "asset_R310",
+    "message": "Paramos o moinho preventivamente depois de um ruído estranho no mancal. Preciso de uma análise presencial antes de religar."
+  }
+]

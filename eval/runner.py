@@ -225,11 +225,16 @@ def run_all(split: str = "train", run_judge: bool = True) -> dict:
         dict com results (lista), summary (métricas agregadas)
     """
     setup_phoenix_tracing()
-    cases_path = Path("agent-input/cases.json")
+
+    # O conjunto derivado tem arquivo proprio de casos E de gabarito: cenarios que
+    # eu construi sobre ativos que o case original nao usa. Mantidos separados
+    # para que a nota deles nunca se misture com a dos 17 fornecidos.
+    derivados = split == "derivados"
+    cases_path = Path("agent-input/cases-derivados.json" if derivados else "agent-input/cases.json")
     cases = json.loads(cases_path.read_text(encoding="utf-8"))
-    cases = filter_cases(cases, split)
-    expected_list = load_expected_paths()
-    expected_map = {e["id"]: e for e in expected_list}
+    if not derivados:
+        cases = filter_cases(cases, split)
+    expected_map = {e["id"]: e for e in load_expected_paths(derivados=derivados)}
 
     from agent.version import AGENT_VERSION
 
@@ -296,8 +301,9 @@ def main():
 
     parser = argparse.ArgumentParser(description="Runner de avaliação do agente Tractian")
     parser.add_argument("--case", type=str, help="Roda um caso específico (ticket_id)")
-    parser.add_argument("--split", choices=["train", "test", "all"], default="train",
-                        help="Split a rodar (padrão: train — o teste é held-out)")
+    parser.add_argument("--split", choices=["train", "test", "all", "derivados"], default="train",
+                        help="Split a rodar (padrão: train — o teste é held-out; "
+                             "`derivados` usa os cenários construídos por mim, reportados à parte)")
     parser.add_argument("--no-judge", action="store_true", help="Pula avaliação subjetiva")
     parser.add_argument("--no-cache", action="store_true",
                         help="Ignora o cache de decisões — obrigatório para medir custo e latência reais")

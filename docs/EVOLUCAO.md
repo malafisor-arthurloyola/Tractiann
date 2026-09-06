@@ -267,6 +267,50 @@ para medir:
 .venv\Scripts\python.exe -m eval.runner --split train --no-cache
 ```
 
+---
+
+## Resultados finais — três conjuntos, dois juízes
+
+### Acurácia por conjunto (agente v7 · omniroute → claude-sonnet-4.5)
+
+| conjunto | origem | acertos | conservadores | arriscados |
+| :--- | :--- | ---: | ---: | ---: |
+| treino | parceiro | 9/13 — 69% | 4 | **0** |
+| teste held-out | parceiro | 3/4 — 75% | 1 | **0** |
+| derivados | construídos por mim | 5/6 — 83% | 1 | **0** |
+
+**Zero erros arriscados em 23 tickets.** O agente erra, e erra sempre para o lado que não
+afirma nem altera nada sem respaldo.
+
+> Os cenários derivados são reportados **separados** de propósito. Um gabarito escrito por
+> quem também escreveu o agente pode favorecê-lo sem intenção — somar os dois num número
+> só apagaria essa distinção. Cada entrada de `eval/expected-paths-derivados.json` carrega
+> um campo `derivacao` explicando de que regra o rótulo saiu, para ser auditável.
+
+### O mesmo agente, dois juízes
+
+Decisões congeladas por cache — **13 de 13 idênticas**. Só o avaliador mudou.
+
+| eixo | juiz Sonnet 4.5 | juiz Gemini 3.6 | delta |
+| :--- | ---: | ---: | ---: |
+| nota geral | 6,92 | 6,77 | −0,15 |
+| **honestidade** | **7,62** | **5,62** | **−2,00** |
+| clareza | 7,31 | 8,54 | +1,23 |
+| fundamentação | 6,46 | 6,69 | +0,23 |
+| segurança | 8,31 | 8,15 | −0,15 |
+
+A nota agregada praticamente não se moveu. **Honestidade caiu dois pontos inteiros** — e é
+exatamente o eixo que pergunta se o agente afirmou algo que os dados não sustentam. Um
+modelo avaliando a própria saída é leniente com a falha que ele mesmo comete.
+
+> [!warning] O que este experimento **não** prova
+> Sonnet e Gemini são modelos diferentes, com calibrações diferentes. Parte do delta pode
+> ser rigor geral do Gemini nesse eixo, não viés de autoavaliação. Isolar exigiria o 2×2
+> completo — Gemini escrevendo e Sonnet julgando também. Não foi feito.
+
+A conclusão que **se sustenta**: o eixo de honestidade é sensível a quem julga, e a nota
+agregada esconde isso. Por isso os eixos são reportados separados.
+
 ## Limitações conhecidas
 
 - **Variância entre rodadas.** `temperature=0.3` produz oscilação de ~1 caso

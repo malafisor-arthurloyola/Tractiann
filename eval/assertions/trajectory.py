@@ -14,9 +14,18 @@ from pathlib import Path
 import json
 
 
-def load_expected_paths() -> list:
-    """Carrega o gabarito de trajetórias esperadas (lista de casos)."""
-    path = Path(__file__).resolve().parent.parent / "expected-paths.json"
+def load_expected_paths(derivados: bool = False) -> list:
+    """Carrega o gabarito de trajetórias esperadas (lista de casos).
+
+    Args:
+        derivados: carrega os cenários que EU construí sobre ativos não usados
+            pelo case original, em vez dos 17 fornecidos pelo parceiro. Ficam em
+            arquivo separado de propósito: um gabarito escrito por quem também
+            escreveu o agente pode, sem intenção, favorecê-lo. Os dois conjuntos
+            nunca devem ser somados num número só.
+    """
+    nome = "expected-paths-derivados.json" if derivados else "expected-paths.json"
+    path = Path(__file__).resolve().parent.parent / nome
     return json.loads(path.read_text(encoding="utf-8"))
 
 
