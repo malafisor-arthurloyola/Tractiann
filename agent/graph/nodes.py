@@ -24,10 +24,10 @@ from typing import Literal
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
+from ..llm import build_llm
 from ..logging.phoenix import record_node
 from ..tools.mcp_client import call_tool
 from .state import AgentState
@@ -36,14 +36,13 @@ from .state import AgentState
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
-def _get_llm():
-    """Cria o LLM sob demanda (lazy). Só falha se não tiver API key no uso."""
-    return ChatOpenAI(
-        model=os.getenv("OPENAI_MODEL", "openai/gpt-oss-20b"),
-        base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
-        api_key=os.getenv("OPENAI_API_KEY", ""),
-        temperature=0.3,
-    )
+def _get_llm(structured_output=None):
+    """LLM sob demanda (lazy), com fallback entre provedores.
+
+    Ver `agent/llm.py`: se a cota do provedor principal acabar, a chamada cai
+    automaticamente no próximo configurado.
+    """
+    return build_llm(temperature=0.3, structured_output=structured_output)
 
 
 # ---------------------------------------------------------------------------
@@ -336,11 +335,39 @@ class AgentDecision(BaseModel):
         default=None,
         description="id do alvo: analysis_id (reprocess/specialist), model_id (retrain) ou asset_id (update_config)",
     )
+    # Estes dois campos são um andaime de raciocínio: obrigam o modelo a
+    # enumerar o que de fato observou e o que faltou ANTES de redigir a
+    # resposta. Sem eles o juiz apontava respostas fluentes mas mal
+    # fundamentadas — e, pior, afirmando coisas que a evidência não sustentava.
+    evidencias: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Evidências CONCRETAS observadas que sustentam a decisão, uma por item. "
+            "Cite o dado e seu valor (ex.: 'baseline.state = invalidated', "
+            "'model.processing_state = delayed'). NUNCA liste algo que não apareça "
+            "nas evidências fornecidas."
+        ),
+    )
+    limitacoes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "O que faltou e COMO isso limita a conclusão, uma por item "
+            "(ex.: 'rms indisponível: não dá para confirmar a tendência de vibração'). "
+            "Lista vazia só se realmente não houve lacuna alguma."
+        ),
+    )
     justification: str = Field(
         description="Justificativa técnica interna, EM PORTUGUÊS, citando as evidências que sustentam a decisão"
     )
     customer_message: str = Field(
-        description="Resposta ao cliente EM PORTUGUÊS, em linguagem simples, sem jargão, reconhecendo lacunas quando houver"
+        description=(
+            "Resposta ao cliente EM PORTUGUÊS. Estrutura obrigatória, em prosa corrida "
+            "(sem títulos nem listas): (1) responda DIRETAMENTE o que ele perguntou; "
+            "(2) explique com base nas `evidencias`, traduzindo o jargão; "
+            "(3) reconheça as `limitacoes` explicitamente, se houver; "
+            "(4) diga qual é o próximo passo. Nunca afirme como certo algo que as "
+            "evidências não mostram."
+        )
     )
 
 
@@ -403,7 +430,21 @@ Comece por O QUE O CLIENTE PEDIU; depois confirme se a evidência sustenta.
 
 Na dúvida entre ORIENT e ACT, prefira ORIENT.
 Na dúvida entre ORIENT e ESCALATE, só escale se a evidência realmente não permitir
-uma explicação honesta, ou se o caso exigir presença física."""
+uma explicação honesta, ou se o caso exigir presença física.
+
+## Padrão de qualidade da resposta
+A resposta é avaliada em quatro eixos. O que separa uma resposta boa de uma medíocre:
+
+- HONESTIDADE: dizer explicitamente o que faltou e como isso limita a conclusão.
+  Silenciar sobre a lacuna já é falha; afirmar como fato algo que os dados não
+  mostram é a falha grave.
+- FUNDAMENTAÇÃO: citar a evidência ESPECÍFICA que leva àquela conclusão — o estado
+  do baseline, o detection_mode, o pico do espectro, o processing_state do modelo.
+  "Analisamos os dados e está tudo bem" não fundamenta nada.
+- CLAREZA: linguagem de conversa, sem jargão não explicado. O cliente precisa
+  terminar de ler sabendo qual é o próximo passo.
+- SEGURANÇA: o nível de intervenção tem que corresponder ao que a evidência
+  sustenta — nem agir no escuro, nem escalar tendo a resposta em mãos."""
 
 
 def _evidence_ledger(state: AgentState) -> str:
@@ -515,7 +556,7 @@ def decide(state: AgentState) -> dict:
                        "action": action_type, "from_cache": True}],
         }
 
-    llm = _get_llm().with_structured_output(AgentDecision)
+    llm = _get_llm(structured_output=AgentDecision)
     result: AgentDecision = llm.invoke([
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=context_text),
@@ -529,6 +570,8 @@ def decide(state: AgentState) -> dict:
         "decision": result.decision,
         "action.type": action_type,
         "llm.model": os.getenv("OPENAI_MODEL", ""),
+        "response.evidencias": result.evidencias,
+        "response.limitacoes": result.limitacoes,
     })
 
     return {

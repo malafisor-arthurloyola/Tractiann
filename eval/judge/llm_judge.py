@@ -16,8 +16,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
+
+from agent.llm import build_llm
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / "agent" / ".env")
 
@@ -101,12 +102,7 @@ def judge_response(
     Returns:
         dict com as notas (0-10), nota_geral e razao
     """
-    llm = ChatOpenAI(
-        model=os.getenv("OPENAI_MODEL", "openai/gpt-oss-20b"),
-        base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
-        api_key=os.getenv("OPENAI_API_KEY", ""),
-        temperature=0.1,
-    ).with_structured_output(JudgeVerdict)
+    llm = build_llm(temperature=0.1, structured_output=JudgeVerdict)
 
     prompt = JUDGE_PROMPT.format(
         ticket=ticket,
