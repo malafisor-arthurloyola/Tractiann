@@ -157,7 +157,7 @@ def _publicar_avaliacoes(span_id: str | None, trajectory: dict | None, judge: di
         acertou = bool(trajectory.get("decision_ok"))
         avaliacoes["decisao_correta"] = {
             "score": 1.0 if acertou else 0.0,
-            "label": "correta" if acertou else "incorreta",
+            "label": "correta" if acertou else (trajectory.get("erro_tipo") or "incorreta"),
             "explanation": "; ".join(trajectory.get("details") or []),
             "annotator_kind": "CODE",
         }
@@ -259,10 +259,20 @@ def run_all(split: str = "train", run_judge: bool = True) -> dict:
         (r["expected_decision"], str(r.get("decision"))) for r in graded
     )
 
+    # Erros separados por lado da escada de consequência: um agente industrial
+    # que erra para o lado seguro (escalar) não é equivalente a um que erra para
+    # o lado arriscado (afirmar ou agir sem respaldo).
+    from eval.assertions.trajectory import classificar_erro
+    tipos = [classificar_erro(r.get("expected_decision"), r.get("decision")) for r in graded]
+    conservadores = sum(1 for x in tipos if x == "conservador")
+    arriscados = sum(1 for x in tipos if x == "arriscado")
+
     summary = {
         "total": len(results),
         "decision_accuracy": round(len(hits) / len(graded), 3) if graded else 0,
         "decision_hits": f"{len(hits)}/{len(graded)}",
+        "erros_conservadores": conservadores,
+        "erros_arriscados": arriscados,
         "decisions": dict(decisions),
         "verdicts": dict(verdicts),
         "trajectory_avg_score": round(sum(traj_scores) / len(traj_scores), 3) if traj_scores else 0,

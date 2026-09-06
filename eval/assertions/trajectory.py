@@ -43,6 +43,31 @@ def expected_decision(expected: dict) -> str | None:
     return "orient"
 
 
+# Escada de consequência da decisão, do mais seguro ao mais arriscado.
+# `escalate` não afirma nem altera nada; `orient` faz uma afirmação técnica sobre
+# uma máquina; `act` altera estado na plataforma.
+CONSEQUENCIA = {"escalate": 0, "orient": 1, "act": 2}
+
+
+def classificar_erro(esperado: str | None, real: str | None) -> str | None:
+    """Classifica um erro de decisão como conservador ou arriscado.
+
+    Num contexto industrial os dois erros não custam igual. Orientar errado sobre
+    uma máquina em falha custa mais caro que ocupar um engenheiro com um caso que
+    talvez desse para resolver remotamente. O gabarito trata todo desvio como
+    erro de mesmo peso; esta função separa os dois lados.
+
+    Returns:
+        None se acertou, "conservador" se decidiu algo MENOS consequente que o
+        esperado, "arriscado" se decidiu algo MAIS consequente.
+    """
+    if not esperado or not real or esperado == real:
+        return None
+    if esperado not in CONSEQUENCIA or real not in CONSEQUENCIA:
+        return None
+    return "arriscado" if CONSEQUENCIA[real] > CONSEQUENCIA[esperado] else "conservador"
+
+
 def _expected_api_categories(expected: dict) -> set:
     """Extrai as categorias de GET esperadas do gabarito."""
     cats = set()
@@ -157,6 +182,7 @@ def assert_trajectory(result: dict, expected: dict) -> dict:
         "passed": decision_ok,
         "score": round(score / total, 3),
         "decision_ok": decision_ok,
+        "erro_tipo": classificar_erro(exp_decision, real_decision),
         "details": details,
     }
 
