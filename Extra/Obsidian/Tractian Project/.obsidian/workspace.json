@@ -39,13 +39,18 @@
             "id": "fa3cc78449e37594",
             "type": "leaf",
             "state": {
-              "type": "graph",
-              "state": {},
-              "icon": "lucide-git-fork",
-              "title": "Visualização em gráfico"
+              "type": "markdown",
+              "state": {
+                "file": "Camada MCP - Tools.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "Camada MCP - Tools"
             }
           }
-        ]
+        ],
+        "currentTab": 2
       }
     ],
     "direction": "vertical"
@@ -212,13 +217,14 @@
       "bases:Criar nova base": false
     }
   },
-  "active": "f610ebeabf2a0f34",
+  "active": "fa3cc78449e37594",
   "lastOpenFiles": [
+    "MOC Tractian.md",
+    "Arquitetura do Agente.md",
     "Avaliação do Agente.md.tmp.4296.1994c4eff089",
     "Ambiente e Reprodutibilidade.md",
     "Evidência Compensatória.md",
     "Módulo Raso vs Profundo.md",
-    "Arquitetura do Agente.md",
     "Aprendizado - Missão.md",
     "Ações Reais no Nó Act.md",
     "Decisões de Arquitetura.md",

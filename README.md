@@ -61,10 +61,10 @@ flowchart LR
         MC["mcp_client"] -- "stdio" --> MS["mcp_server<br/>18 tools"]
     end
 
-    INV --> MC
+    INV == "6 tools de leitura<br/>+ até 3 compensatórias" ==> MC
     MS -- "HTTP" --> API[("API industrial<br/>:8000")]
-    ACT --> MC
-    ESC --> MC
+    ACT -. "1 tool de mutação" .-> MC
+    ESC -. "1 tool de mutação" .-> MC
 
     DEC -. "fallback automático" .-> LLM["omniroute → openrouter → groq"]
 
@@ -80,7 +80,10 @@ flowchart LR
 ```
 
 Os nós do grafo **não conhecem URL**: pedem uma tool pelo nome e a camada MCP resolve.
-As setas pontilhadas são observação — não fazem parte do fluxo de decisão.
+
+A seta grossa é o volume real: **a investigação é a maior consumidora do MCP** — 6 tools de
+leitura na primeira passada, mais até 3 compensatórias. `agir` e `escalar` usam uma tool cada,
+no fim. Toda ida à API atravessa a mesma camada, seja para ler ou para mudar estado.
 
 Três decisões que governam o comportamento:
 
