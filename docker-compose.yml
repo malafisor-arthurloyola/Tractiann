@@ -22,9 +22,19 @@ services:
     ports:
       - "6006:6006"
     environment:
-      PHOENIX_OTEL_ENDPOINT: http://localhost:6006
+      # Persistência: o Phoenix grava os traces no MESMO Postgres da tabela
+      # `execucoes`, num schema separado. Sem isto ele usaria um SQLite dentro
+      # do container e os traces sumiriam a cada restart.
+      PHOENIX_SQL_DATABASE_URL: postgresql://tractian:tractian_dev@postgres-agent:5432/tractian_agent
+      PHOENIX_SQL_DATABASE_SCHEMA: phoenix
+      # Arquivos auxiliares vão para o volume (antes o Phoenix escrevia em
+      # /root/.phoenix, fora do volume declarado — o mount era um no-op).
+      PHOENIX_WORKING_DIR: /data
     volumes:
       - phoenix_data:/data
+    depends_on:
+      postgres-agent:
+        condition: service_healthy
 
 volumes:
   postgres_data:

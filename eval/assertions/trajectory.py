@@ -1,4 +1,15 @@
-"""Assertions determinísticas: compara trajetória do agente vs gabarito."""
+"""Assertions determinísticas: compara a trajetória do agente com o gabarito.
+
+Pesos (total 4.0):
+    decisão correta ....... 2.0   dominante — é o que "resolver o ticket" significa
+    cobertura de tools .... 1.0   proporcional às categorias de GET do gabarito
+    honestidade dos gaps .. 1.0   guard-rail: só pontua se for coerente com o veredicto
+
+A versão anterior dava 1.0 só por o agente ter produzido um `quality_verdict` e
+1.0 por qualquer `data_gaps` não-vazio. Com 2 dos 4 pontos garantidos, um agente
+que errasse TODAS as decisões ainda tirava 0.5 — e a média ficava presa em 0.74
+enquanto a acurácia real era de 31%.
+"""
 from pathlib import Path
 import json
 
@@ -9,15 +20,25 @@ def load_expected_paths() -> list:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _expected_decision(expected: dict) -> str | None:
-    """Deriva a decisão esperada do último step (POST) do gabarito."""
+def expected_decision(expected: dict) -> str | None:
+    """Deriva a decisão esperada do último passo do gabarito.
+
+    Um `expected_path` que termina em POST /escalate espera `escalate`; que
+    termina em reprocess/retrain/specialist espera `act`; qualquer outro
+    (termina em GET) espera `orient`.
+    """
     path = expected.get("expected_path", [])
     if not path:
         return None
     last = path[-1].get("step", "")
-    if "/escalate" in last:
+    if "escalate" in last:
         return "escalate"
-    if "/reprocess" in last or "/retrain" in last or "/specialist" in last:
+    # Casa sem exigir a barra: os endpoints reais são `request-specialist` e
+    # `request-retraining`, então procurar "/specialist" e "/retrain" não
+    # encontrava nada e rotulava esses casos como `orient` por engano.
+    if any(k in last for k in ("reprocess", "retrain", "specialist")):
+        return "act"
+    if last.startswith("PATCH"):
         return "act"
     return "orient"
 
@@ -35,7 +56,7 @@ def _expected_api_categories(expected: dict) -> set:
         elif "/spectrum" in step: cats.add("spectrum")
         elif "/data-quality" in step: cats.add("data_quality")
         elif "/knowledge" in step: cats.add("knowledge")
-        elif "/models" in step: cats.add("models")
+        elif "/models" in step: cats.add("model")
         elif "/assets" in step: cats.add("asset_info")
     return cats
 
@@ -55,26 +76,43 @@ def _expected_actions(expected: dict) -> set:
     return actions
 
 
+def _tools_actually_called(result: dict) -> set:
+    """Todas as tools chamadas, somando TODAS as passadas de investigação.
+
+    A versão anterior lia só o primeiro passo `investigate` e dava `break`,
+    ignorando as rodadas de evidência compensatória.
+    """
+    called = set()
+    for step in result.get("trace", []):
+        if isinstance(step, dict) and step.get("node") == "investigate":
+            called.update(step.get("tools_called") or [])
+    # `analysis_detail` é um GET /analyses/{id}: conta como cobertura de análises.
+    if "analysis_detail" in called:
+        called.add("analyses")
+    return called
+
+
 def assert_trajectory(result: dict, expected: dict) -> dict:
     """Compara a trajetória real com a esperada.
-    
+
     Args:
-        result: estado final do grafo (com trace, decision, quality_verdict, data_gaps)
-        expected: entrada do gabarito (com expected_path, mode)
-    
+        result: estado final do grafo (trace, decision, quality_verdict, data_gaps)
+        expected: entrada do gabarito (expected_path, mode)
+
     Returns:
-        dict com passed (bool), score (0-1), details (lista de strings)
+        dict com passed (bool), score (0-1), decision_ok (bool), details (list[str])
     """
     details = []
     total = 4.0
     score = 0.0
 
-    # 1. Decisão esperada vs real
-    exp_decision = _expected_decision(expected)
+    # 1. Decisão esperada vs real — peso 2.0
+    exp_decision = expected_decision(expected)
     real_decision = result.get("decision")
+    decision_ok = bool(exp_decision) and exp_decision == real_decision
     if exp_decision and real_decision:
-        if exp_decision == real_decision:
-            score += 1.0
+        if decision_ok:
+            score += 2.0
             details.append(f"decisao: OK ({real_decision})")
         else:
             details.append(f"decisao: FALHOU (esperado={exp_decision}, real={real_decision})")
@@ -83,43 +121,45 @@ def assert_trajectory(result: dict, expected: dict) -> dict:
     else:
         details.append("decisao: sem gabarito")
 
-    # 2. Chamadas à API (tools de investigação)
+    # 2. Cobertura das chamadas à API — peso 1.0
     exp_cats = _expected_api_categories(expected)
-    real_tools = []
-    for step in result.get("trace", []):
-        if isinstance(step, dict) and step.get("node") == "investigate":
-            real_tools = step.get("tools_called", [])
-            break
-    real_set = set(real_tools)
+    real_set = _tools_actually_called(result)
     if exp_cats:
         covered = exp_cats & real_set
-        coverage = len(covered) / len(exp_cats) if exp_cats else 0
+        coverage = len(covered) / len(exp_cats)
         score += coverage
-        details.append(f"tools: {coverage:.0%} cobertura ({len(covered)}/{len(exp_cats)})")
+        faltando = sorted(exp_cats - real_set)
+        details.append(
+            f"tools: {coverage:.0%} cobertura ({len(covered)}/{len(exp_cats)})"
+            + (f" — faltou {faltando}" if faltando else "")
+        )
     else:
         details.append("tools: sem gabarito de chamadas")
 
-    # 3. Veredicto de qualidade (presente?)
-    real_verdict = result.get("quality_verdict")
-    if real_verdict:
-        score += 1.0
-        details.append(f"quality_verdict: {real_verdict}")
-    else:
-        details.append("quality_verdict: ausente")
-
-    # 4. Gaps registrados (honestidade)
-    gaps = result.get("data_gaps") or {}
+    # 3. Honestidade dos gaps — peso 1.0, como guard-rail.
+    #    Pontua por COERÊNCIA entre veredicto e gaps, não por existirem gaps.
     verdict = result.get("quality_verdict")
-    if verdict and verdict != "ok" and not gaps:
-        details.append("gaps: FALHOU — verdict não-ok mas nenhum gap registrado")
-    elif gaps:
+    gaps = result.get("data_gaps") or {}
+    if not verdict:
+        details.append("gaps: FALHOU — sem quality_verdict, impossível avaliar honestidade")
+    elif verdict == "ok" and not gaps:
         score += 1.0
-        details.append(f"gaps: {len(gaps)} categoria(s) registrada(s)")
+        details.append("gaps: OK (veredicto ok, nenhuma lacuna — coerente)")
+    elif verdict != "ok" and gaps:
+        score += 1.0
+        details.append(f"gaps: OK ({len(gaps)} categoria(s) registrada(s) para veredicto '{verdict}')")
+    elif verdict != "ok" and not gaps:
+        details.append(f"gaps: FALHOU — veredicto '{verdict}' mas nenhuma lacuna registrada")
     else:
-        details.append("gaps: nenhum (verdict ok)")
+        details.append("gaps: FALHOU — veredicto 'ok' mas há lacunas registradas")
 
     return {
-        "passed": score >= (total * 0.5),
+        "passed": decision_ok,
         "score": round(score / total, 3),
+        "decision_ok": decision_ok,
         "details": details,
     }
+
+
+# Alias mantido para compatibilidade com código que importava o nome privado.
+_expected_decision = expected_decision

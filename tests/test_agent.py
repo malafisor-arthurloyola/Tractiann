@@ -1,18 +1,27 @@
 """Testes do agente industrial — grafo, rotas, quality_check, cache, ações.
 
 Todos os testes rodam SEM chamar a LLM (mock) e SEM gastar token.
-Foco na lógica pura: rotas do grafo, quality_check, cache de decisões,
-extração de ação, e chamadas HTTP (mockadas).
+Foco na lógica pura: rotas do grafo, classificação de evidência, escolha de
+evidência compensatória, validação de alvo de ação e cache de decisões.
 """
 import pytest
-import json
-from unittest.mock import patch, MagicMock
-from pathlib import Path
 
 from agent.graph.nodes import (
-    quality_check, _extract_action, _extract_first_analysis_id,
-    _find_model_id, _build_action_url, _cache_key, _CACHE_DIR,
+    AgentDecision,
+    COMPENSATION,
+    CORE_TOOLS,
+    EMPTY_MODES,
+    USABLE_MODES,
+    _available_ids,
+    ACTION_TOOLS,
+    _build_action_call,
+    _cache_key,
     _extract_analyses_list,
+    _first_analysis_id,
+    _knowledge_query,
+    _next_compensation,
+    _validate_action,
+    quality_check,
 )
 from agent.graph.agent import route_after_quality, route_after_decide, _core_count
 
@@ -37,40 +46,55 @@ def _envelope(mode, data=None, notes=None):
     return {"mode": mode, "notes": notes, "data": data or {}}
 
 
+def _complete_raw(**overrides):
+    raw = {
+        "asset_info": _envelope("complete", {"id": "asset_M101", "machine_type": "motor_induction"}),
+        "baseline": _envelope("complete", {"state": "established"}),
+        "analyses": _envelope("complete", {"analyses": [{"id": "an_1"}]}),
+        "rms": _envelope("complete", {"samples": []}),
+        "spectrum": _envelope("complete", {"fft": []}),
+        "data_quality": _envelope("complete", {"freshness_minutes": 10}),
+    }
+    raw.update(overrides)
+    return raw
+
+
 # ---- Tests: route_after_quality ----
 
 class TestRouteAfterQuality:
+    """O quality_check não é mais porteiro: nenhum veredicto manda para escalate.
 
-    def test_ok_routes_to_decide(self):
-        s = _make_state(quality_verdict="ok")
+    O roteamento depende só de haver evidência compensatória pendente e
+    orçamento de rodadas.
+    """
+
+    def test_sem_next_tool_vai_para_decide(self):
+        assert route_after_quality(_make_state(quality_verdict="ok")) == "decide"
+
+    def test_unavailable_ainda_vai_para_decide(self):
+        # Antes o `unavailable` era curto-circuitado num escalate hardcoded.
+        s = _make_state(quality_verdict="unavailable", next_tool=None)
         assert route_after_quality(s) == "decide"
 
-    def test_partial_routes_to_decide(self):
-        s = _make_state(quality_verdict="partial")
-        assert route_after_quality(s) == "decide"
-
-    def test_unavailable_routes_to_decide(self):
-        """unavailable AGORA vai para decide (fix do bug anterior)."""
-        s = _make_state(quality_verdict="unavailable")
-        assert route_after_quality(s) == "decide"
-
-    def test_incomplete_with_next_tool_routes_investigate(self):
-        s = _make_state(quality_verdict="incomplete", next_tool="knowledge",
-                        tools_called=["baseline", "analyses", "rms", "spectrum", "data_quality"])
+    def test_next_tool_volta_para_investigate(self):
+        s = _make_state(quality_verdict="incomplete", next_tool="model",
+                        tools_called=list(CORE_TOOLS))
         assert route_after_quality(s) == "investigate"
 
-    def test_incomplete_without_next_tool_routes_decide(self):
-        s = _make_state(quality_verdict="incomplete", next_tool=None)
-        assert route_after_quality(s) == "decide"
+    def test_partial_tambem_busca_compensacao(self):
+        s = _make_state(quality_verdict="partial", next_tool="knowledge",
+                        tools_called=list(CORE_TOOLS))
+        assert route_after_quality(s) == "investigate"
 
-    def test_incomplete_exceeds_retry_budget_routes_decide(self):
-        """Após MAX_RETRIES retries, deve ir para decide mesmo com next_tool."""
+    def test_orcamento_de_rodadas_esgotado_vai_para_decide(self):
         s = _make_state(
             quality_verdict="incomplete", next_tool="knowledge",
-            tools_called=["baseline", "analyses", "rms", "spectrum", "data_quality",
-                          "knowledge", "knowledge", "knowledge"]  # 8 tools (5 core + 3)
+            tools_called=list(CORE_TOOLS) + ["model", "analysis_detail", "knowledge"],
         )
         assert route_after_quality(s) == "decide"
+
+    def test_core_count_acompanha_core_tools(self):
+        assert _core_count() == len(CORE_TOOLS)
 
 
 # ---- Tests: route_after_decide ----
@@ -78,186 +102,343 @@ class TestRouteAfterQuality:
 class TestRouteAfterDecide:
 
     def test_orient_routes_respond(self):
-        s = _make_state(decision="orient")
-        assert route_after_decide(s) == "respond"
+        assert route_after_decide(_make_state(decision="orient")) == "respond"
 
     def test_act_routes_act(self):
-        s = _make_state(decision="act")
-        assert route_after_decide(s) == "act"
+        assert route_after_decide(_make_state(decision="act")) == "act"
 
     def test_escalate_routes_escalate(self):
-        s = _make_state(decision="escalate")
-        assert route_after_decide(s) == "escalate"
+        assert route_after_decide(_make_state(decision="escalate")) == "escalate"
 
 
-# ---- Tests: quality_check ----
+# ---- Tests: classificação de evidência ----
+
+class TestClassificacaoDeModos:
+    """`conflict` e `partial` preservam o payload; só os outros dois o esvaziam."""
+
+    def test_conflict_e_partial_sao_utilizaveis(self):
+        assert "conflict" in USABLE_MODES
+        assert "partial" in USABLE_MODES
+        assert "complete" in USABLE_MODES
+
+    def test_inconclusive_e_unavailable_sao_vazios(self):
+        assert EMPTY_MODES == {"inconclusive", "unavailable"}
+
 
 class TestQualityCheck:
 
-    def test_all_complete_gives_ok(self):
-        raw = {
-            "baseline": _envelope("complete", {"state": "established"}),
-            "analyses": _envelope("complete", {"analyses": [{"id": "a1"}]}),
-            "rms": _envelope("complete", {"samples": []}),
-            "spectrum": _envelope("complete", {"fft": []}),
-            "data_quality": _envelope("complete", {"freshness": 10}),
-        }
-        s = _make_state(raw=raw)
-        r = quality_check(s)
+    def test_tudo_completo_da_ok(self):
+        r = quality_check(_make_state(raw=_complete_raw()))
         assert r["quality_verdict"] == "ok"
         assert r["data_gaps"] == {}
+        assert r["next_tool"] is None
 
-    def test_baseline_unavailable_gives_unavailable(self):
-        raw = {
-            "baseline": _envelope("unavailable"),
-            "analyses": _envelope("complete", {"analyses": [{"id": "a1"}]}),
-        }
-        s = _make_state(raw=raw)
-        r = quality_check(s)
-        assert r["quality_verdict"] == "unavailable"
+    def test_conflict_em_analyses_nao_bloqueia(self):
+        """O caso que mais custava: `conflict` traz o payload inteiro.
+
+        A versão anterior declarava `unavailable` e escalava, jogando fora a
+        evidência mais rica do case.
+        """
+        raw = _complete_raw(
+            analyses=_envelope("conflict", {"analyses": [{"id": "an_1"}, {"id": "an_2"}]})
+        )
+        r = quality_check(_make_state(raw=raw))
+        assert r["quality_verdict"] == "partial"
+        assert "analyses" in r["data_gaps"]
+        assert "conflict" in r["data_gaps"]["analyses"][0]
+
+    def test_baseline_partial_nao_bloqueia(self):
+        # `partial` no baseline só omite `features`; o `state` continua lá.
+        raw = _complete_raw(baseline=_envelope("partial", {"state": "established"}))
+        r = quality_check(_make_state(raw=raw))
+        assert r["quality_verdict"] == "partial"
+
+    def test_baseline_vazio_da_incomplete_nao_unavailable(self):
+        raw = _complete_raw(baseline=_envelope("unavailable"))
+        r = quality_check(_make_state(raw=raw))
+        assert r["quality_verdict"] == "incomplete"
         assert "baseline" in r["data_gaps"]
 
-    def test_analyses_empty_gives_incomplete(self):
+    def test_unavailable_so_quando_nada_e_utilizavel(self):
         raw = {
-            "baseline": _envelope("complete"),
-            "analyses": _envelope("complete", {"analyses": []}),
+            "baseline": _envelope("unavailable"),
+            "analyses": _envelope("inconclusive"),
+            "rms": _envelope("unavailable"),
         }
-        s = _make_state(raw=raw)
-        r = quality_check(s)
+        r = quality_check(_make_state(raw=raw))
+        assert r["quality_verdict"] == "unavailable"
+
+    def test_analises_vazias_contam_como_ausencia(self):
+        raw = _complete_raw(analyses=_envelope("complete", {"analyses": []}))
+        r = quality_check(_make_state(raw=raw))
         assert r["quality_verdict"] == "incomplete"
         assert "analyses" in r["data_gaps"]
 
-    def test_rms_partial_gives_partial(self):
-        raw = {
-            "baseline": _envelope("complete"),
-            "analyses": _envelope("complete", {"analyses": [{"id": "a1"}]}),
-            "rms": _envelope("partial"),
-        }
-        s = _make_state(raw=raw)
+    def test_sugere_compensacao_quando_ha_lacuna(self):
+        raw = _complete_raw(baseline=_envelope("unavailable"))
+        s = _make_state(raw=raw, tools_called=list(CORE_TOOLS))
         r = quality_check(s)
-        assert r["quality_verdict"] == "partial"
-        assert "rms" in r["data_gaps"]
-
-    def test_suggests_backup_tool_when_incomplete(self):
-        raw = {
-            "baseline": _envelope("complete"),
-            "analyses": _envelope("complete", {"analyses": []}),
-        }
-        s = _make_state(raw=raw, tools_called=["baseline", "analyses", "rms", "spectrum", "data_quality"])
-        r = quality_check(s)
-        assert r["next_tool"] == "knowledge"
+        assert r["next_tool"] in COMPENSATION["baseline"]
 
 
-# ---- Tests: action extraction ----
+# ---- Tests: evidência compensatória ----
 
-class TestExtractAction:
+class TestCompensacao:
 
-    def test_reprocess_from_keywords(self):
-        state = _make_state(raw={
-            "analyses": _envelope("complete", {"analyses": [{"id": "an_9906"}]}),
-        })
-        t, target = _extract_action("Precisamos reprocessar a análise para atualizar.", state)
-        assert t == "reprocess"
-        assert target == "an_9906"
+    def test_baseline_vazio_busca_modelo(self):
+        raw = _complete_raw(baseline=_envelope("unavailable"))
+        assert _next_compensation(raw, list(CORE_TOOLS)) == "model"
 
-    def test_specialist_from_keywords(self):
-        state = _make_state(raw={
-            "analyses": _envelope("complete", {"analyses": [{"id": "an_9902"}]}),
-        })
-        t, target = _extract_action("Solicitar análise especialista.", state)
-        assert t == "specialist"
-        assert target == "an_9902"
+    def test_nao_repete_tool_ja_chamada(self):
+        raw = _complete_raw(baseline=_envelope("unavailable"))
+        seguinte = _next_compensation(raw, list(CORE_TOOLS) + ["model"])
+        assert seguinte != "model"
+        assert seguinte in COMPENSATION["baseline"]
 
-    def test_retrain_from_keywords(self):
-        state = _make_state(raw={})
-        t, target = _extract_action("Solicitar retreinamento do modelo.", state)
-        assert t == "retrain"
-        assert target == "mdl_vib_v3"  # fallback
+    def test_sem_lacuna_nao_ha_compensacao(self):
+        assert _next_compensation(_complete_raw(), list(CORE_TOOLS)) is None
 
-    def test_config_from_keywords(self):
-        state = _make_state(asset_id="asset_V301")
-        t, target = _extract_action("Alterar configuração criticidade.", state)
-        assert t == "update_config"
-        assert target == "asset_V301"
+    def test_esgota_candidatos_e_devolve_none(self):
+        raw = {"baseline": _envelope("unavailable")}
+        tried = list(CORE_TOOLS) + COMPENSATION["baseline"]
+        assert _next_compensation(raw, tried) is None
 
 
-# ---- Tests: action URL building ----
+class TestKnowledgeQuery:
+    """A busca é `contains` da query inteira: só termo curto casa."""
 
-class TestBuildActionUrl:
+    def test_termo_de_rolamento(self):
+        assert _knowledge_query("Troquei o rolamento da bomba") == "rolamento"
+
+    def test_termo_de_limiar_rms(self):
+        assert _knowledge_query("A partir de qual valor de RMS é alarme?") == "rms"
+
+    def test_termo_eletrico(self):
+        assert _knowledge_query("Pode ser problema elétrico?") == "eletric"
+
+    def test_default_quando_nada_casa(self):
+        assert _knowledge_query("mensagem sem termo de dominio") == "baseline"
+
+    def test_nunca_devolve_asset_id(self):
+        # A versão anterior buscava "manutenção {asset_id}", que nunca dava match.
+        q = _knowledge_query("problema no asset_V301")
+        assert "asset_" not in q
+
+
+# ---- Tests: validação do alvo da ação ----
+
+class TestValidateAction:
+    """Structured output impede prosa no lugar da decisão, mas não impede o
+    modelo de citar um id inexistente. Aqui o alvo é conferido."""
+
+    def _state_com_analises(self):
+        return _make_state(raw=_complete_raw(
+            analyses=_envelope("complete", {"analyses": [{"id": "an_9903"}, {"id": "an_9904"}]}),
+            model=_envelope("complete", {"id": "mdl_vib_v3"}),
+        ))
+
+    def _decisao(self, **kw):
+        base = dict(decision="act", action_type="reprocess", action_target="an_9903",
+                    justification="j" * 25, customer_message="msg")
+        base.update(kw)
+        return AgentDecision(**base)
+
+    def test_alvo_valido_e_preservado(self):
+        t, alvo = _validate_action(self._decisao(), self._state_com_analises())
+        assert (t, alvo) == ("reprocess", "an_9903")
+
+    def test_id_alucinado_cai_para_analise_real(self):
+        d = self._decisao(action_target="an_INEXISTENTE")
+        t, alvo = _validate_action(d, self._state_com_analises())
+        assert (t, alvo) == ("reprocess", "an_9903")
+
+    def test_sem_analise_a_acao_e_cancelada(self):
+        d = self._decisao()
+        s = _make_state(raw=_complete_raw(analyses=_envelope("unavailable")))
+        assert _validate_action(d, s) == (None, None)
+
+    def test_update_config_sempre_mira_o_ativo(self):
+        d = self._decisao(action_type="update_config", action_target="qualquer_coisa")
+        t, alvo = _validate_action(d, self._state_com_analises())
+        assert (t, alvo) == ("update_config", "asset_M101")
+
+    def test_retrain_mira_o_modelo_conhecido(self):
+        d = self._decisao(action_type="retrain", action_target="mdl_errado")
+        t, alvo = _validate_action(d, self._state_com_analises())
+        assert (t, alvo) == ("retrain", "mdl_vib_v3")
+
+    def test_orient_nao_produz_acao(self):
+        d = self._decisao(decision="orient", action_type=None, action_target=None)
+        assert _validate_action(d, self._state_com_analises()) == (None, None)
+
+
+class TestAvailableIds:
+
+    def test_lista_ids_de_analises(self):
+        s = _make_state(raw=_complete_raw(
+            analyses=_envelope("complete", {"analyses": [{"id": "an_1"}, {"id": "an_2"}]})
+        ))
+        assert _available_ids(s)["analysis_ids"] == ["an_1", "an_2"]
+
+    def test_asset_id_vem_do_estado(self):
+        assert _available_ids(_make_state())["asset_id"] == "asset_M101"
+
+
+# ---- Tests: ações via tools MCP ----
+
+class TestBuildActionCall:
+    """Os nós não montam URL: escolhem a tool MCP e o parâmetro do alvo."""
 
     def test_reprocess(self):
-        assert _build_action_url("reprocess", "an_9906") == ("POST", "/analyses/an_9906/reprocess")
+        assert _build_action_call("reprocess", "an_1") == ("reprocessAnalysis", {"analysisId": "an_1"})
 
     def test_specialist(self):
-        assert _build_action_url("specialist", "an_9902") == ("POST", "/analyses/an_9902/request-specialist")
+        assert _build_action_call("specialist", "an_1") == ("requestSpecialistAnalysis", {"analysisId": "an_1"})
 
     def test_retrain(self):
-        assert _build_action_url("retrain", "mdl_vib_v3") == ("POST", "/models/mdl_vib_v3/request-retraining")
+        assert _build_action_call("retrain", "mdl_1") == ("requestRetraining", {"modelId": "mdl_1"})
 
     def test_update_config(self):
-        assert _build_action_url("update_config", "asset_V301") == ("PATCH", "/assets/asset_V301")
+        assert _build_action_call("update_config", "asset_1") == ("updateAssetConfig", {"assetId": "asset_1"})
 
     def test_escalate(self):
-        assert _build_action_url("escalate", "case_123") == ("POST", "/cases/case_123/escalate")
+        assert _build_action_call("escalate", "case_1") == ("escalateCase", {"caseId": "case_1"})
+
+    def test_acao_desconhecida_cai_para_escalate(self):
+        assert _build_action_call("inexistente", "case_1")[0] == "escalateCase"
+
+    def test_toda_acao_do_modelo_tem_tool(self):
+        """Cada action_type que o AgentDecision aceita precisa de uma tool MCP."""
+        from typing import get_args
+        aceitos = {a for a in get_args(AgentDecision.model_fields["action_type"].annotation) if isinstance(a, str)}
+        assert aceitos <= set(ACTION_TOOLS), f"sem tool MCP: {aceitos - set(ACTION_TOOLS)}"
 
 
-# ---- Tests: cache key invalidation ----
+# ---- Tests: cache ----
 
 class TestCacheKey:
 
     def test_same_version_same_key(self):
-        from agent.version import AGENT_VERSION
-        k1 = _cache_key("context_a")
-        k2 = _cache_key("context_a")
-        assert k1 == k2
+        assert _cache_key("contexto") == _cache_key("contexto")
 
     def test_different_context_different_key(self):
-        k1 = _cache_key("context_a")
-        k2 = _cache_key("context_b")
-        assert k1 != k2
+        assert _cache_key("contexto A") != _cache_key("contexto B")
 
     def test_version_change_invalidates_key(self):
         import agent.version as v
-        old = v.AGENT_VERSION
-        k1 = _cache_key("context_a")
-        v.AGENT_VERSION = "v-test-invalid"
-        k2 = _cache_key("context_a")
-        v.AGENT_VERSION = old
-        assert k1 != k2
+        original = v.AGENT_VERSION
+        try:
+            k1 = _cache_key("mesmo contexto")
+            v.AGENT_VERSION = "v-outra"
+            k2 = _cache_key("mesmo contexto")
+            assert k1 != k2
+        finally:
+            v.AGENT_VERSION = original
 
 
-# ---- Tests: extract helpers ----
+# ---- Tests: helpers de extração ----
 
 class TestExtractHelpers:
 
     def test_extract_analyses_list_empty(self):
-        assert _extract_analyses_list({}) == []
-        assert _extract_analyses_list(None) == []
+        assert _extract_analyses_list({"data": {}}) == []
 
     def test_extract_analyses_list_with_data(self):
-        env = {"data": {"analyses": [{"id": "a1"}, {"id": "a2"}]}}
-        result = _extract_analyses_list(env)
-        assert len(result) == 2
-        assert result[0]["id"] == "a1"
+        env = {"data": {"analyses": [{"id": "a1"}]}}
+        assert _extract_analyses_list(env) == [{"id": "a1"}]
 
-    def test_extract_first_analysis_id(self):
-        raw = {"analyses": {"data": {"analyses": [{"id": "an_9906"}, {"id": "an_9907"}]}}}
-        assert _extract_first_analysis_id(raw) == "an_9906"
+    def test_extract_analyses_list_envelope_invalido(self):
+        assert _extract_analyses_list(None) == []
 
-    def test_extract_first_analysis_id_empty(self):
-        assert _extract_first_analysis_id({}) is None
+    def test_first_analysis_id(self):
+        raw = {"analyses": {"data": {"analyses": [{"id": "an_7"}, {"id": "an_8"}]}}}
+        assert _first_analysis_id(raw) == "an_7"
+
+    def test_first_analysis_id_empty(self):
+        assert _first_analysis_id({"analyses": {"data": {"analyses": []}}}) is None
 
 
-# ---- Tests: state fields ----
+# ---- Tests: contrato do estado ----
 
 class TestStateFields:
 
     def test_agent_state_has_action_fields(self):
         from agent.graph.state import AgentState
-        hints = AgentState.__annotations__
-        assert "action_type" in hints
-        assert "action_target" in hints
+        for campo in ("action_type", "action_target", "decision_justification"):
+            assert campo in AgentState.__annotations__
 
     def test_agent_state_has_tools_called(self):
         from agent.graph.state import AgentState
         assert "tools_called" in AgentState.__annotations__
+
+    def test_asset_info_esta_no_nucleo(self):
+        """Sem `GET /assets/{id}` não há frequências características e o
+        espectro fica ininterpretável."""
+        assert "asset_info" in CORE_TOOLS
+
+
+# ---- Tests: camada MCP ----
+
+class TestMCPEnvelope:
+    """Conversão do retorno de uma tool MCP no envelope da API.
+
+    Testa só a desserialização — não sobe o servidor nem exige a API no ar.
+    """
+
+    def _resultado(self, *, structured=None, textos=(), erro=False):
+        class _Item:
+            def __init__(self, text): self.text = text
+
+        class _Resultado:
+            structuredContent = structured
+            content = [_Item(t) for t in textos]
+            isError = erro
+
+        return _Resultado()
+
+    def test_structured_content_tem_prioridade(self):
+        from agent.tools.mcp_client import _extrair_envelope
+        r = self._resultado(structured={"mode": "complete", "data": {"state": "established"}})
+        assert _extrair_envelope(r)["mode"] == "complete"
+
+    def test_desembrulha_result_do_sdk(self):
+        # O SDK embrulha retornos não-objeto em {"result": ...}
+        from agent.tools.mcp_client import _extrair_envelope
+        r = self._resultado(structured={"result": {"mode": "partial"}})
+        assert _extrair_envelope(r)["mode"] == "partial"
+
+    def test_cai_para_json_em_texto(self):
+        from agent.tools.mcp_client import _extrair_envelope
+        r = self._resultado(textos=['{"mode": "conflict", "data": {}}'])
+        assert _extrair_envelope(r)["mode"] == "conflict"
+
+    def test_texto_nao_json_vira_unavailable(self):
+        from agent.tools.mcp_client import _extrair_envelope
+        env = _extrair_envelope(self._resultado(textos=["explodiu"]))
+        assert env["mode"] == "unavailable"
+        assert "explodiu" in env["notes"]
+
+    def test_sem_conteudo_vira_unavailable(self):
+        from agent.tools.mcp_client import _extrair_envelope
+        assert _extrair_envelope(self._resultado())["mode"] == "unavailable"
+
+
+class TestMCPServerRegistro:
+    """O servidor MCP precisa expor toda operação que o agente invoca."""
+
+    def test_todas_as_tools_de_acao_existem_no_servidor(self):
+        import agent.tools.mcp_server as servidor
+        registradas = {
+            nome for nome in dir(servidor)
+            if not nome.startswith("_") and callable(getattr(servidor, nome, None))
+        }
+        for tool, _param in ACTION_TOOLS.values():
+            assert tool in registradas, f"tool de ação ausente no servidor MCP: {tool}"
+
+    def test_tem_bloco_main(self):
+        """Sem `__main__`, `python -m agent.tools.mcp_server` encerra sem subir
+        servidor — e o cliente stdio falha com erro de TaskGroup."""
+        from pathlib import Path
+        fonte = Path("agent/tools/mcp_server.py").read_text(encoding="utf-8")
+        assert '__name__ == "__main__"' in fonte
+        assert 'mcp.run(transport="stdio")' in fonte

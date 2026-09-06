@@ -4,20 +4,33 @@ version = "0.1.0"
 description = "Agente industrial de suporte — TRACTIAN x Inteli"
 requires-python = ">=3.11"
 dependencies = [
+    # Orquestração do agente
     "langgraph==1.2.11",
     "langchain-core>=1.6,<2",
     "langchain-openai>=1.6,<2",
     "openai>=3,<4",
+    # Camada MCP — a interface entre o agente e a API (ADR-0001).
+    # No mcp 2.x o FastMCP foi renomeado para MCPServer.
     "mcp==2.1.1",
-    "opentelemetry-api>=1.44",
-    "opentelemetry-sdk>=1.44",
-    "opentelemetry-exporter-otlp>=1.44",
+    # Observabilidade — Phoenix (tracing) via OpenTelemetry.
+    # `arize-phoenix-otel` embute o wiring de TracerProvider/exporter numa chamada
+    # (`phoenix.otel.register`), por isso não declaramos os pacotes OTel um a um.
+    "arize-phoenix-otel>=0.6",
     "openinference-instrumentation-langchain>=0.1.70",
+    # Instrumenta as chamadas HTTP à API industrial (a fase de investigação).
+    # httpx é coberto pelo OpenTelemetry padrão — o OpenInference só cobre
+    # frameworks de LLM (langchain, openai, llamaindex...), não clientes HTTP.
+    "opentelemetry-instrumentation-httpx>=0.50b0",
+    # Log de execuções
     "psycopg2-binary>=2.9,<3",
+    # Infra comum
     "python-dotenv>=1.0",
     "httpx>=0.28",
     "pydantic>=2.0",
+    # Interface de demonstração (lê os parquet de data/)
     "streamlit>=1.30",
+    "pandas>=2.0",
+    "pyarrow>=15",
 ]
 
 [project.optional-dependencies]
@@ -29,3 +42,11 @@ dev = [
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["agent", "eval"]
+
+[tool.pytest.ini_options]
+# `test_agent.py` na raiz não é suíte de teste: é um script ad-hoc que roda o
+# agente no import. Restringir a coleta evita que o pytest o execute.
+testpaths = ["tests"]

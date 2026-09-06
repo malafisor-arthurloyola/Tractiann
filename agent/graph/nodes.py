@@ -1,18 +1,43 @@
+"""Nós do grafo do agente industrial.
+
+Fluxo: investigate → quality_check → decide → (respond | act | escalate)
+
+Duas ideias governam este módulo:
+
+1. **O quality_check anota, não bloqueia.** A API industrial é probabilística de
+   propósito. Um envelope degradado quase nunca significa "não dá para decidir":
+   `conflict` devolve o payload inteiro mais um flag, e `partial` só remove
+   campos secundários. Quem decide é o LLM, ciente das lacunas — o nó só
+   classifica a força da evidência.
+
+2. **Evidência compensatória, nunca retry.** `resolve_mode` na API é um hash
+   determinístico de (seed, recurso, categoria): repetir o mesmo GET devolve
+   exatamente o mesmo envelope, sempre. Quando um dado falha, o agente busca
+   *outro* endpoint que responda à mesma pergunta.
+
+Toda ida à API passa pela camada MCP (`agent/tools/mcp_client.call_tool`), como
+manda o ADR-0001 — os nós não conhecem URLs, só nomes de tool.
+"""
+import os
+from pathlib import Path
+from typing import Literal
+
+from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.types import interrupt
-import os
-from pathlib import Path
-from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+
+from ..logging.phoenix import record_node
+from ..tools.mcp_client import call_tool
 from .state import AgentState
-from ..tools.client import tractian_request
 
 # Carrega .env do agent/ (sobe 2 níveis: graph/ → agent/)
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
 def _get_llm():
-    """Cria o LLM sob demanda (lazy). Só falha se não tiver API key no momento do uso."""
+    """Cria o LLM sob demanda (lazy). Só falha se não tiver API key no uso."""
     return ChatOpenAI(
         model=os.getenv("OPENAI_MODEL", "openai/gpt-oss-20b"),
         base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
@@ -21,73 +46,120 @@ def _get_llm():
     )
 
 
-def _handle_request(category: str, asset_id: str, user_id: str) -> tuple[str, dict]:
-    """Chama a tool certa pra uma categoria e devolve (a_chave, envelope).
-    
-    Usado tanto pela investigação inicial quanto pelo retry (próxima tool).
+# ---------------------------------------------------------------------------
+# Camada de tools — categorias que o agente sabe buscar
+# ---------------------------------------------------------------------------
+
+# Buscadas sempre, na primeira passada.
+# `asset_info` entra aqui porque quase todo raciocínio depende dela: traz
+# sensor_status, machine_type, rotation_rpm e as frequências características
+# (bpfo/bpfi/bsf/ftf, line_frequency) — sem elas é impossível ler um espectro.
+CORE_TOOLS = ["asset_info", "baseline", "analyses", "rms", "spectrum", "data_quality"]
+
+# Buscadas só como evidência compensatória, quando algo do núcleo falhou.
+COMPENSATORY_TOOLS = ["model", "knowledge", "analysis_detail"]
+
+# A API não expõe operação de listar modelos entre as 17; o dataset tem um
+# único modelo. Configurável para não ficar cravado no código.
+DEFAULT_MODEL_ID = os.getenv("TRACTIAN_DEFAULT_MODEL_ID", "mdl_vib_v3")
+
+# `search_knowledge` faz `contains` da query inteira contra título/corpo, então
+# só termo curto casa. Mapeia sinais do ticket para o termo que acha o documento.
+_KNOWLEDGE_TERMS: list[tuple[tuple[str, ...], str]] = [
+    (("rolamento", "bearing", "bpfo", "bpfi"), "rolamento"),
+    (("eletric", "elétric", "fase", "tensao", "tensão"), "eletric"),
+    (("lubrific", "graxa", "sintoma"), "sintom"),
+    (("rms", "limiar", "alarme", "threshold", "tendencia", "tendência"), "rms"),
+    (("desbalance", "desalinha", "1x", "2x", "espectro", "fft"), "rms"),
+]
+
+
+def _knowledge_query(message: str) -> str:
+    """Escolhe um termo de busca a partir do texto do ticket.
+
+    A versão anterior buscava `f"manutenção {asset_id}"` — procurar um id de
+    ativo numa base de documentos nunca dava match.
     """
+    text = (message or "").lower()
+    for needles, term in _KNOWLEDGE_TERMS:
+        if any(n in text for n in needles):
+            return term
+    return "baseline"
+
+
+def _first_analysis_id(raw: dict) -> str | None:
+    """Primeiro analysis_id disponível na lista de análises coletada."""
+    for a in _extract_analyses_list(raw.get("analyses", {})):
+        if isinstance(a, dict) and a.get("id"):
+            return a["id"]
+    return None
+
+
+def _handle_request(category: str, state: AgentState, raw: dict) -> tuple[str, dict]:
+    """Chama a tool MCP de uma categoria e devolve (chave, envelope).
+
+    Mapeia a categoria interna (o que o agente quer saber) para o operationId da
+    tool MCP (como a API expõe). Recebe `raw` porque as tools compensatórias
+    dependem do que já foi coletado — o id da análise a detalhar, por exemplo.
+    """
+    asset_id = state["asset_id"]
+
+    if category == "asset_info":
+        return "asset_info", call_tool("getAsset", assetId=asset_id)
     if category == "baseline":
-        return "baseline", tractian_request("GET", f"/assets/{asset_id}/baseline", user_id=user_id)
+        return "baseline", call_tool("getBaseline", assetId=asset_id)
     if category == "analyses":
-        return "analyses", tractian_request("GET", f"/assets/{asset_id}/analyses", user_id=user_id)
+        return "analyses", call_tool("listAnalyses", assetId=asset_id)
     if category == "rms":
-        return "rms", tractian_request("GET", f"/assets/{asset_id}/rms", user_id=user_id)
+        return "rms", call_tool("getRmsSeries", assetId=asset_id)
     if category == "spectrum":
-        return "spectrum", tractian_request("GET", f"/assets/{asset_id}/spectrum", user_id=user_id)
+        return "spectrum", call_tool("getSpectrum", assetId=asset_id)
     if category == "data_quality":
-        return "data_quality", tractian_request("GET", f"/assets/{asset_id}/data-quality", user_id=user_id)
+        return "data_quality", call_tool("getDataQuality", assetId=asset_id)
+    if category == "model":
+        # Traz processing_state (o modelo está atrasado?) e
+        # coverage[].can_learn_baseline (este tipo de máquina aprende baseline?).
+        return "model", call_tool("getModel", modelId=DEFAULT_MODEL_ID)
     if category == "knowledge":
-        # Outra tool complementar: busca procedimento/palavra sobre o ativo
-        return "knowledge", tractian_request(
-            "GET", "/knowledge/search",
-            params={"q": f"manutenção {asset_id}"},
-        )
+        return "knowledge", call_tool("searchKnowledge", q=_knowledge_query(state.get("message", "")))
+    if category == "analysis_detail":
+        analysis_id = _first_analysis_id(raw)
+        if not analysis_id:
+            return "analysis_detail", {
+                "mode": "unavailable",
+                "notes": "nenhum analysis_id conhecido para detalhar",
+                "data": None,
+            }
+        return "analysis_detail", call_tool("getAnalysis", analysisId=analysis_id)
     raise ValueError(f"Categoria de tool desconhecida: {category}")
 
 
-# Tools que devem SEMPRE ser tentadas na investigação inicial
-CORE_TOOLS = ["baseline", "analyses", "rms", "spectrum", "data_quality"]
-# Tools complementares, usadas quando um dado crítico ficou incompleto
-BACKUP_TOOLS = ["knowledge"]
+# ---------------------------------------------------------------------------
+# Classificação de evidência
+# ---------------------------------------------------------------------------
+
+# `conflict` devolve o payload íntegro + flag; `partial` só omite campos
+# secundários (ver _PARTIAL_DROP na API). Ambos continuam decidíveis.
+USABLE_MODES = {"complete", "conflict", "partial"}
+# Estes sim esvaziam o payload: `inconclusive` reduz a {inconclusive, asset_id}
+# e `unavailable` devolve {}.
+EMPTY_MODES = {"inconclusive", "unavailable"}
+
+# Que evidência buscar quando uma categoria vem vazia ou degradada.
+COMPENSATION: dict[str, list[str]] = {
+    "baseline": ["model", "asset_info", "knowledge"],
+    "analyses": ["analysis_detail", "model", "knowledge"],
+    "rms": ["analyses", "data_quality", "knowledge"],
+    "spectrum": ["asset_info", "analysis_detail"],
+    "data_quality": ["asset_info", "knowledge"],
+    "asset_info": ["knowledge"],
+}
 
 
-def investigate(state: AgentState) -> dict:
-    """Nó de investigação: coleta dados da API via tools HTTP.
-
-    - Na 1ª passada, busca as 5 tools principais.
-    - Se voltar do quality_check com `next_tool`, busca APENAS essa tool.
-
-    Retorna APENAS os tools chamados NESTA passada (não a lista inteira),
-    pois `tools_called` usa Annotated[list, operator.add] que appenda.
-    """
-    asset_id = state["asset_id"]
-    user_id = state["user_id"]
-    raw = dict(state.get("raw") or {})
-
-    if state.get("next_tool"):
-        tool = state["next_tool"]
-        try:
-            key, envelope = _handle_request(tool, asset_id, user_id)
-            raw[key] = envelope
-        except Exception as e:
-            raw[tool] = {"mode": "unavailable", "notes": f"erro ao buscar {tool}: {e}", "data": None}
-        new_tools = [tool]
-    else:
-        new_tools = []
-        for tool in CORE_TOOLS:
-            try:
-                key, envelope = _handle_request(tool, asset_id, user_id)
-                raw[key] = envelope
-            except Exception as e:
-                raw[tool] = {"mode": "unavailable", "notes": f"erro ao buscar {tool}: {e}", "data": None}
-            new_tools.append(tool)
-
-    return {
-        "raw": raw,
-        "tools_called": new_tools,
-        "next_tool": None,
-        "trace": [{"node": "investigate", "tools_called": new_tools}],
-    }
+def _mode_of(envelope) -> str:
+    if not isinstance(envelope, dict):
+        return "invalid"
+    return envelope.get("mode", "unknown")
 
 
 def _extract_analyses_list(envelope: dict) -> list:
@@ -99,223 +171,374 @@ def _extract_analyses_list(envelope: dict) -> list:
     return []
 
 
-def quality_check(state: AgentState) -> dict:
-    """Nó de quality check: verifica o envelope de TODAS as tools.
+def _next_compensation(raw: dict, tools_called: list[str]) -> str | None:
+    """Próxima tool compensatória útil, ou None se não houver.
 
-    É o DONO ÚNICO da política de respostas não-completas.
-    Para cada tool, registra honestamente os gaps em `data_gaps` (nunca some).
-    Decide: ok / partial / incomplete / unavailable, e se precisa de outra tool.
+    Percorre as categorias com problema, na ordem de criticidade, e devolve a
+    primeira compensação ainda não tentada.
+    """
+    tried = set(tools_called or [])
+    problematic = [
+        cat for cat in ("baseline", "analyses", "spectrum", "rms", "data_quality", "asset_info")
+        if cat in raw and _mode_of(raw[cat]) != "complete"
+    ]
+    for cat in problematic:
+        for candidate in COMPENSATION.get(cat, []):
+            if candidate not in tried:
+                return candidate
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Nós
+# ---------------------------------------------------------------------------
+
+
+def investigate(state: AgentState) -> dict:
+    """Coleta dados da API via tools HTTP.
+
+    - Na 1ª passada busca as tools do núcleo (`CORE_TOOLS`).
+    - Voltando do quality_check com `next_tool`, busca APENAS essa tool.
+
+    Retorna só as tools chamadas NESTA passada — `tools_called` é
+    Annotated[list, operator.add] e faz o append sozinho.
+    """
+    raw = dict(state.get("raw") or {})
+    modes: dict[str, str] = {}
+
+    targets = [state["next_tool"]] if state.get("next_tool") else list(CORE_TOOLS)
+
+    for tool in targets:
+        try:
+            key, envelope = _handle_request(tool, state, raw)
+            raw[key] = envelope
+            modes[key] = _mode_of(envelope)
+        except Exception as e:
+            raw[tool] = {"mode": "unavailable", "notes": f"erro ao buscar {tool}: {e}", "data": None}
+            modes[tool] = "unavailable"
+
+    record_node(
+        "investigate.envelopes",
+        **{"investigate.tools": targets},
+        **{f"envelope.mode.{k}": v for k, v in modes.items()},
+    )
+
+    return {
+        "raw": raw,
+        "tools_called": targets,
+        "next_tool": None,
+        "trace": [{"node": "investigate", "tools_called": targets, "modes": modes}],
+    }
+
+
+def quality_check(state: AgentState) -> dict:
+    """Classifica a força da evidência coletada. Anota, não bloqueia.
+
+    É o dono único da política sobre respostas não-completas. Para cada
+    categoria registra honestamente o gap em `data_gaps` (que nunca some) e
+    decide se vale buscar evidência compensatória.
+
+    Veredicto:
+      ok          — tudo completo
+      partial     — há degradado, mas tudo continua utilizável
+      incomplete  — alguma categoria veio vazia, com compensação disponível
+      unavailable — NADA utilizável (único caso de bloqueio real)
     """
     raw = state.get("raw") or {}
     gaps: dict[str, list[str]] = {}
-    verdict = "ok"
-    notes = []
+    usable: list[str] = []
+    empty: list[str] = []
+    notes: list[str] = []
 
-    # Verifica TODAS as tools que foram buscadas
     for cat, envelope in raw.items():
-        if not isinstance(envelope, dict):
-            gaps[cat] = ["resposta inválida"]
+        mode = _mode_of(envelope)
+
+        if mode == "complete":
+            usable.append(cat)
             continue
-        mode = envelope.get("mode", "unknown")
 
-        if mode in ("unavailable", "conflict", "inconclusive"):
-            gaps[cat] = [f"mode={mode}: {envelope.get('notes','') or 'sem dado'}"]
-
-            if cat in ("baseline", "analyses"):
-                # Dado crítico indisponível → não dá pra decidir com segurança
-                verdict = "unavailable"
-                notes.append(f"{cat} indisponível ({mode})")
+        if mode in USABLE_MODES:
+            usable.append(cat)
+            detail = (envelope.get("notes") or "").strip()
+            if mode == "conflict":
+                gaps[cat] = [f"mode=conflict: fontes divergem, dados presentes — {detail}"]
+                notes.append(f"{cat} com conflito entre fontes (dados presentes)")
             else:
-                # Dado secundário faltando → parcial, mas não impede decisão
-                if verdict != "unavailable":
-                    verdict = "partial"
-                    notes.append(f"{cat} indisponível ({mode})")
-
-        elif mode == "partial":
-            gaps[cat] = ["dados parciais (campos omitidos)"]
-            if verdict != "unavailable":
-                verdict = "partial"
+                gaps[cat] = [f"mode=partial: campos secundários omitidos — {detail}"]
                 notes.append(f"{cat} parcial")
+        else:
+            empty.append(cat)
+            detail = (envelope.get("notes") or "").strip() if isinstance(envelope, dict) else ""
+            gaps[cat] = [f"mode={mode}: sem dado — {detail}"]
+            notes.append(f"{cat} sem dado ({mode})")
 
-    # Verifica se análises vieram vazias (dado crítico)
+    # Análises que voltaram completas mas vazias não são "dado", são ausência.
     analyses_env = raw.get("analyses")
     if isinstance(analyses_env, dict) and not _extract_analyses_list(analyses_env):
-        if "analyses" not in gaps:
-            gaps["analyses"] = ["nenhuma análise encontrada"]
-        if verdict == "ok":
-            verdict = "incomplete"
-            notes.append("sem análises — tentando tool complementar")
+        gaps.setdefault("analyses", []).append("nenhuma análise encontrada para o ativo")
+        if "analyses" in usable:
+            usable.remove("analyses")
+            empty.append("analyses")
+        notes.append("nenhuma análise registrada")
 
-    # Decide se precisa tentar outra tool (só quando há dado crítico faltando)
+    if not usable:
+        verdict = "unavailable"
+    elif empty:
+        verdict = "incomplete"
+    elif gaps:
+        verdict = "partial"
+    else:
+        verdict = "ok"
+
+    # Só busca compensação quando há de fato algo a compensar.
     next_tool = None
-    if verdict in ("incomplete", "unavailable"):
-        tried = set(state.get("tools_called") or [])
-        for backup in BACKUP_TOOLS:
-            if backup not in tried:
-                next_tool = backup
-                break
+    if verdict in ("incomplete", "unavailable", "partial"):
+        next_tool = _next_compensation(raw, state.get("tools_called") or [])
+
+    record_node("quality_check.evidence", **{
+        "quality.verdict": verdict,
+        "evidence.usable": usable,
+        "evidence.empty": empty,
+        "quality.next_tool": next_tool,
+    })
 
     return {
         "quality_verdict": verdict,
         "quality_notes": "; ".join(notes) if notes else None,
         "data_gaps": gaps,
         "next_tool": next_tool,
-        "trace": [{"node": "quality_check", "verdict": verdict, "gaps": gaps, "next_tool": next_tool}],
+        "trace": [{
+            "node": "quality_check", "verdict": verdict, "gaps": gaps,
+            "usable": usable, "empty": empty, "next_tool": next_tool,
+        }],
     }
 
 
-def _extract_first_analysis_id(raw: dict) -> str | None:
-    """Pega o primeiro analysis_id disponível nas análises coletadas."""
-    analyses = _extract_analyses_list(raw.get("analyses", {}))
-    for a in analyses:
-        if isinstance(a, dict) and a.get("id"):
-            return a["id"]
-    return None
+# ---------------------------------------------------------------------------
+# Decisão
+# ---------------------------------------------------------------------------
 
 
-def _extract_action(decision_text: str, state: AgentState) -> tuple[str, str]:
-    """Determina (action_type, action_target) a partir do texto do LLM + dados.
+class AgentDecision(BaseModel):
+    """Saída estruturada do nó decide.
 
-    O LLM decide "AGIR", mas precisamos saber QUAL ação e EM QUAL alvo. Mapeamos
-    por palavras-chave no texto e pelo alvo disponível (primeira análise, modelo,
-    ou o próprio ativo).
+    Substitui o parsing por substring da versão anterior (`"solicitar" in text`
+    → agir), que confundia prosa comum com intenção de ação.
     """
-    asset_id = state.get("asset_id") or ""
-    text = (decision_text or "").lower()
+
+    decision: Literal["orient", "act", "escalate"] = Field(
+        description="orient=explicar sem alterar nada; act=executar ação na plataforma; escalate=encaminhar a humano"
+    )
+    action_type: Literal["reprocess", "specialist", "retrain", "update_config"] | None = Field(
+        default=None, description="Obrigatório quando decision=act; caso contrário null"
+    )
+    action_target: str | None = Field(
+        default=None,
+        description="id do alvo: analysis_id (reprocess/specialist), model_id (retrain) ou asset_id (update_config)",
+    )
+    justification: str = Field(
+        description="Justificativa técnica interna, EM PORTUGUÊS, citando as evidências que sustentam a decisão"
+    )
+    customer_message: str = Field(
+        description="Resposta ao cliente EM PORTUGUÊS, em linguagem simples, sem jargão, reconhecendo lacunas quando houver"
+    )
+
+
+SYSTEM_PROMPT = """Você é um engenheiro de suporte da TRACTIAN. Recebe tickets de clientes sobre
+dados de sensores em ativos industriais e precisa ORIENTAR, AGIR ou ESCALAR.
+
+## Domínio (use estes conceitos com precisão)
+- BASELINE: o "normal" aprendido DAQUELE ativo específico, a partir do histórico sadio dele.
+  Estados: `learning` (histórico insuficiente) → `established` (confiável) → `invalidated`
+  (mudança física invalidou o histórico; precisa reaprender).
+  O limiar de alarme de RMS DERIVA do baseline do ativo — não é norma ISO nem número fixo.
+- DETECTION MODE: `baseline` = desvio do aprendido (desbalanceamento, desalinhamento,
+  rolamento, elétrica) e EXIGE baseline `established`. `symptom` = o sintoma já indica a
+  falha sozinho (ex.: lubrificação) e INDEPENDE do estado do baseline.
+- ESPECTRO (FFT): 1× indica desbalanceamento, 2× desalinhamento, BPFO/BPFI/BSF/FTF
+  rolamentos, 2× a frequência de linha indica falha elétrica. Interpretar exige as
+  frequências características do ativo.
+- MODELO: `processing_state` diz se o processamento está em dia ou atrasado;
+  `coverage[].can_learn_baseline` diz se aquele tipo de máquina sequer aprende baseline.
+
+## Qualidade da evidência
+Os dados chegam num envelope com um modo. Interprete assim:
+- `complete`: dado íntegro.
+- `conflict`: dado ÍNTEGRO, com fontes divergindo. NÃO é ausência de dado — é a evidência
+  mais rica que existe. Analise a divergência e explique-a; não escale só por haver conflito.
+- `partial`: só campos secundários foram omitidos. O essencial está presente.
+- `inconclusive` / `unavailable`: aí sim não veio dado.
+
+## Regras
+1. Fundamente a resposta APENAS nas evidências fornecidas abaixo.
+2. Nunca invente dado. Se houver lacuna, reconheça-a explicitamente na resposta ao cliente.
+3. Ao AGIR, escolha o alvo entre os ids listados nas evidências — nunca invente um id.
+
+## Como escolher a decisão
+Comece por O QUE O CLIENTE PEDIU; depois confirme se a evidência sustenta.
+
+1) O cliente PEDIU uma ação na plataforma — ou relatou que já corrigiu o problema
+   físico e o diagnóstico continua desatualizado?
+   Exemplos: "reprocessa a análise", "treina o modelo de novo", "quero que um
+   especialista veja", "troquei o rolamento mas o insight continua acusando falha".
+   → ACT, se a evidência sustentar e houver um id de alvo válido:
+     - intervenção física já feita, análise ficou obsoleta ....... reprocess
+     - cliente quer parecer humano especializado sobre o caso .... specialist
+     - o modelo erra de forma sistemática naquele tipo de ativo .. retrain
+     - configuração cadastral do ativo está incorreta ............ update_config
+   Se a evidência NÃO sustentar o pedido, ORIENTE explicando por quê — nunca aja no escuro.
+
+2) O cliente PEDIU intervenção humana ou de campo, ou houve falha física já
+   consumada (quebra, parada) que atendimento remoto não resolve?
+   Exemplos: "isso ultrapassa o suporte remoto", "preciso de alguém em campo",
+   "o equipamento quebrou e ninguém me avisou".
+   → ESCALATE, dizendo o motivo técnico e exatamente o que faltou de evidência.
+
+3) O cliente fez uma PERGUNTA — quer entender algo?
+   Exemplos: "por que...", "isso é falso positivo?", "é elétrico ou mecânico?",
+   "a partir de que valor vocês consideram alarme?".
+   → ORIENT. Explique usando a evidência. Uma pergunta pede explicação, não ação.
+   NÃO dispare reprocess/retrain só porque você notou algo estranho de passagem:
+   agir sem o cliente ter pedido é erro.
+
+Na dúvida entre ORIENT e ACT, prefira ORIENT.
+Na dúvida entre ORIENT e ESCALATE, só escale se a evidência realmente não permitir
+uma explicação honesta, ou se o caso exigir presença física."""
+
+
+def _evidence_ledger(state: AgentState) -> str:
+    """Monta o balanço de evidência que vai ao LLM.
+
+    Mostra explicitamente o que veio íntegro, o que veio degradado (e como) e o
+    que não veio — para o modelo decidir ciente das lacunas em vez de receber um
+    blob indiferenciado.
+    """
     raw = state.get("raw") or {}
+    parts = [
+        f"TICKET: {state['message']}",
+        f"ATIVO: {state['asset_id']}",
+        f"FORÇA DA EVIDÊNCIA: {state.get('quality_verdict')} ({state.get('quality_notes') or 'sem ressalvas'})",
+        "",
+        "--- EVIDÊNCIAS COLETADAS ---",
+    ]
 
-    # Prioridade de palavras-chave (regras do gabarito)
-    if "retrein" in text or "retrain" in text:
-        model_id = _find_model_id(raw)
-        return "retrain", model_id or "mdl_vib_v3"
-    if "config" in text or "criticidade" in text or "critical" in text:
-        return "update_config", asset_id
-    if "especialista" in text or "specialist" in text:
-        aid = _extract_first_analysis_id(raw)
-        return "specialist", aid or ""
-    if "reprocess" in text or "reprocessar" in text:
-        aid = _extract_first_analysis_id(raw)
-        return "reprocess", aid or ""
-    # Fallback
-    return "reprocess", _extract_first_analysis_id(raw) or ""
+    for cat in CORE_TOOLS + COMPENSATORY_TOOLS:
+        env = raw.get(cat)
+        if not isinstance(env, dict):
+            continue
+        mode = _mode_of(env)
+        if cat == "analyses":
+            items = _extract_analyses_list(env)
+            if items:
+                parts.append(f"[{cat}] mode={mode} — {len(items)} análise(s): {items[:3]}")
+            else:
+                parts.append(f"[{cat}] mode={mode} — nenhuma análise registrada")
+        elif mode in USABLE_MODES:
+            parts.append(f"[{cat}] mode={mode} — {env.get('data')}")
+        else:
+            parts.append(f"[{cat}] mode={mode} — SEM DADO ({env.get('notes') or ''})")
+
+    gaps = state.get("data_gaps") or {}
+    if gaps:
+        parts += ["", "--- LACUNAS (considere na decisão e reconheça ao cliente) ---", str(gaps)]
+
+    ids = _available_ids(state)
+    if ids:
+        parts += ["", f"--- IDS VÁLIDOS PARA AÇÃO --- {ids}"]
+
+    return "\n".join(parts)
 
 
-def _find_model_id(raw: dict) -> str | None:
-    """Procura um model_id real (field `id`) num envelope de models, se houver."""
-    models_env = raw.get("models")
-    if isinstance(models_env, dict):
-        data = models_env.get("data") or {}
-        if isinstance(data, dict) and data.get("id"):
-            return data["id"]
-    return None
+def _available_ids(state: AgentState) -> dict:
+    """Ids reais que o LLM pode usar como alvo de ação."""
+    raw = state.get("raw") or {}
+    analyses = [a.get("id") for a in _extract_analyses_list(raw.get("analyses", {})) if isinstance(a, dict) and a.get("id")]
+    model_env = raw.get("model")
+    model_id = None
+    if isinstance(model_env, dict) and isinstance(model_env.get("data"), dict):
+        model_id = model_env["data"].get("id")
+    return {
+        "analysis_ids": analyses,
+        "model_id": model_id or DEFAULT_MODEL_ID,
+        "asset_id": state.get("asset_id"),
+    }
+
+
+def _validate_action(decision: AgentDecision, state: AgentState) -> tuple[str | None, str | None]:
+    """Valida (ou corrige) o alvo da ação escolhida pelo LLM.
+
+    Structured output impede o modelo de escrever prosa no lugar da decisão, mas
+    não o impede de citar um id que não existe. Aqui o alvo é conferido contra os
+    ids realmente presentes na evidência.
+    """
+    if decision.decision != "act" or not decision.action_type:
+        return None, None
+
+    ids = _available_ids(state)
+    action_type = decision.action_type
+    target = (decision.action_target or "").strip() or None
+
+    if action_type == "update_config":
+        return action_type, ids["asset_id"]
+    if action_type == "retrain":
+        return action_type, target if target == ids["model_id"] else ids["model_id"]
+    # reprocess / specialist operam sobre uma análise
+    valid = ids["analysis_ids"]
+    if target in valid:
+        return action_type, target
+    if valid:
+        return action_type, valid[0]
+    # Sem análise alvo, a ação não tem onde acontecer.
+    return None, None
 
 
 def decide(state: AgentState) -> dict:
-    """Nó de decisão: usa o LLM para decidir entre orientar, agir ou escalar.
-    
-    O LLM recebe o ticket + dados coletados + os GAPS honestos (o que NÃO tinha),
-    para tomar uma decisão ciente das lacunas.
+    """Decide entre orientar, agir ou escalar — sempre via LLM.
+
+    A versão anterior curto-circuitava aqui quando o veredicto era `unavailable`
+    e devolvia um dossiê fixo, idêntico para todos os tickets e com afirmações
+    não verificadas. Agora o LLM sempre recebe o balanço de evidência real.
     """
-    verdict = state.get("quality_verdict", "ok")
+    context_text = _evidence_ledger(state)
 
-    # Sem dado crítico → escala direto com dossiê técnico estruturado
-    if verdict == "unavailable":
-        raw = state.get("raw") or {}
-        base_mode = raw.get("baseline", {}).get("mode", "inconclusivo")
-        an_mode = raw.get("analyses", {}).get("mode", "indisponível")
-        gaps_list = list(state.get("data_gaps", {}).keys())
-        gaps_str = ", ".join(gaps_list) if gaps_list else "baseline / análises"
-
-        dossie = (
-            f"📋 DOSSIÊ DE ESCALONAMENTO PARA SUPORTE TÉCNICO HUMANO\n\n"
-            f"1. Motivo do Escalonamento: Dados críticos essenciais para diagnóstico seguro estão indisponíveis na API (Baseline={base_mode}, Análises={an_mode}).\n"
-            f"2. Evidências Coletadas vs Lacunas: O sinal de RMS foi obtido, porém as lacunas em [{gaps_str}] impedem a validação técnica do limiar de alarme.\n"
-            f"3. Por que a IA não concluiu: Na Tractian, o limiar de vibração deriva do Baseline aprendido do ativo específico. Sem histórico homologado, não é seguro certificar se o alarme é real ou descalibração.\n"
-            f"4. Checklist de Ação para o Engenheiro de Suporte:\n"
-            f"   - [ ] Esclarecer ao cliente que o alarme é dinâmico (calculado pelo histórico da máquina) e não uma norma fixa.\n"
-            f"   - [ ] Inspecionar conectividade e qualidade do sensor no ativo '{state.get('asset_id')}'.\n"
-            f"   - [ ] Verificar se o baseline deste ativo precisa ser restabelecido na plataforma."
-        )
-
-        return {
-            "decision": "escalate",
-            "decision_justification": dossie,
-            "response": dossie,
-            "trace": [{"node": "decide", "decision": "escalate", "reason": "critical_data_unavailable", "gaps": gaps_list}],
-        }
-
-    # Monta contexto com dados coletados E gaps registrados
-    raw = state.get("raw") or {}
-    parts = [
-        f"Ticket: {state['message']}",
-        f"Ativo: {state['asset_id']}",
-        f"Qualidade da resposta: {verdict} ({state.get('quality_notes') or 'ok'})",
-    ]
-
-    for cat in ["baseline", "rms", "spectrum", "data_quality"]:
-        env = raw.get(cat)
-        if isinstance(env, dict) and env.get("mode") == "complete":
-            parts.append(f"{cat}: {env.get('data')}")
-        elif isinstance(env, dict):
-            parts.append(f"{cat}: {env.get('mode')} (dado parcial/ausente)")
-
-    analyses_list = _extract_analyses_list(raw.get("analyses", {}))
-    if analyses_list:
-        parts.append(f"Analyses ({len(analyses_list)}): {analyses_list[:3]}")
-
-    # GAPS honestos — o que o agente NÃO teve
-    gaps = state.get("data_gaps") or {}
-    if gaps:
-        parts.append(f"Lacunas de dados (importante considerar): {gaps}")
-
-    context_text = "\n".join(parts)
-
-    # Cache em disco: se este contexto já foi decidido antes, reusa (economiza token
-    # em re-execuções de dev/avaliação). Chave = hash do prompt.
     cached = _cached_decision(context_text)
     if cached is not None:
-        decision = cached[0]
-        if decision == "act":
-            action_type, action_target = _extract_action(cached[1], state)
-        else:
-            action_type, action_target = None, None
+        record_node("decide.outcome", **{"cache.hit": True, "decision": cached.decision})
+        action_type, action_target = _validate_action(cached, state)
         return {
-            "decision": decision,
-            "decision_justification": cached[1],
-            "response": cached[1],
+            "decision": cached.decision,
+            "decision_justification": cached.justification,
+            "response": cached.customer_message,
             "action_type": action_type,
             "action_target": action_target,
-            "trace": [{"node": "decide", "decision": decision, "from_cache": True}],
+            "trace": [{"node": "decide", "decision": cached.decision,
+                       "action": action_type, "from_cache": True}],
         }
 
-    llm = _get_llm()
-    response = llm.invoke([
+    llm = _get_llm().with_structured_output(AgentDecision)
+    result: AgentDecision = llm.invoke([
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=context_text),
     ])
 
-    text = response.content.lower()
-    if "agir" in text or "reprocessar" in text or "solicitar" in text or "retreinar" in text:
-        decision = "act"
-    elif "escalar" in text or "humano" in text or "intervenção" in text:
-        decision = "escalate"
-    else:
-        decision = "orient"
+    _write_decision_cache(context_text, result)
+    action_type, action_target = _validate_action(result, state)
 
-    _write_decision_cache(context_text, decision, response.content)
-
-    if decision == "act":
-        action_type, action_target = _extract_action(response.content, state)
-    else:
-        action_type, action_target = None, None
+    record_node("decide.outcome", **{
+        "cache.hit": False,
+        "decision": result.decision,
+        "action.type": action_type,
+        "llm.model": os.getenv("OPENAI_MODEL", ""),
+    })
 
     return {
-        "decision": decision,
-        "decision_justification": response.content,
-        "response": response.content,
+        "decision": result.decision,
+        "decision_justification": result.justification,
+        "response": result.customer_message,
         "action_type": action_type,
         "action_target": action_target,
-        "trace": [{"node": "decide", "decision": decision, "action": action_type}],
+        "trace": [{"node": "decide", "decision": result.decision,
+                   "action": action_type, "from_cache": False}],
     }
 
 
@@ -324,71 +547,87 @@ def decide(state: AgentState) -> dict:
 _CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".run" / "llm_cache"
 
 
+def _cache_enabled() -> bool:
+    """Cache ligado por padrão; `AGENT_LLM_CACHE=0` desliga.
+
+    As rodadas que medem custo e latência precisam desligar — com cache não há
+    chamada de LLM e portanto não há tokens nem latência para medir.
+    """
+    return os.getenv("AGENT_LLM_CACHE", "1") != "0"
+
+
 def _cache_key(context_text: str) -> str:
     """Chave = hash(versão + contexto). Mudar AGENT_VERSION invalida o cache."""
     import hashlib
     from ..version import AGENT_VERSION
-    payload = f"{AGENT_VERSION}:{context_text}"
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+    return hashlib.sha1(f"{AGENT_VERSION}:{context_text}".encode("utf-8")).hexdigest()
 
 
-def _cached_decision(context_text: str):
-    """Retorna (decision, response) em cache, ou None se não houver."""
+def _cached_decision(context_text: str) -> AgentDecision | None:
+    if not _cache_enabled():
+        return None
     try:
         path = _CACHE_DIR / f"{_cache_key(context_text)}.json"
         if not path.exists():
             return None
         import json
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data["decision"], data["response"]
+        return AgentDecision(**json.loads(path.read_text(encoding="utf-8")))
     except Exception:
         return None
 
 
-def _write_decision_cache(context_text: str, decision: str, response: str) -> None:
+def _write_decision_cache(context_text: str, decision: AgentDecision) -> None:
+    if not _cache_enabled():
+        return
     try:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         import json
         path = _CACHE_DIR / f"{_cache_key(context_text)}.json"
-        path.write_text(
-            json.dumps({"decision": decision, "response": response}),
-            encoding="utf-8",
-        )
+        path.write_text(json.dumps(decision.model_dump(), ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
 
+# ---------------------------------------------------------------------------
+# Ações
+# ---------------------------------------------------------------------------
+
+
 def respond(state: AgentState) -> dict:
-    """Nó de resposta: entrega a orientação ao cliente."""
+    """Entrega a orientação ao cliente. Não altera nada na plataforma."""
+    record_node("respond.final", **{"final.decision": "orient"})
     return {
         "trace": [{"node": "respond", "action": "orient",
                    "response": (state.get("response") or "")[:120]}],
     }
 
 
-def _build_action_url(action_type: str, target: str) -> tuple[str, str]:
-    """Mapeia action_type + target para (method, path) da API."""
-    if action_type == "reprocess":
-        return "POST", f"/analyses/{target}/reprocess"
-    if action_type == "specialist":
-        return "POST", f"/analyses/{target}/request-specialist"
-    if action_type == "retrain":
-        return "POST", f"/models/{target}/request-retraining"
-    if action_type == "update_config":
-        return "PATCH", f"/assets/{target}"
-    return "POST", f"/cases/{target}/escalate"
+# Ação do agente → tool MCP que a executa, com o nome do parâmetro do alvo.
+# Os nós não montam URL: quem conhece endpoint é o servidor MCP (ADR-0001).
+ACTION_TOOLS: dict[str, tuple[str, str]] = {
+    "reprocess": ("reprocessAnalysis", "analysisId"),
+    "specialist": ("requestSpecialistAnalysis", "analysisId"),
+    "retrain": ("requestRetraining", "modelId"),
+    "update_config": ("updateAssetConfig", "assetId"),
+    "escalate": ("escalateCase", "caseId"),
+}
+
+
+def _build_action_call(action_type: str, target: str) -> tuple[str, dict]:
+    """Mapeia action_type + alvo para (nome da tool MCP, argumentos)."""
+    tool, param = ACTION_TOOLS.get(action_type, ACTION_TOOLS["escalate"])
+    return tool, {param: target}
 
 
 def act(state: AgentState) -> dict:
-    """Nó de ação: pausa para HITL, depois executa POST/PATCH real na API."""
+    """Pausa para confirmação humana (HITL) e, se aprovado, executa a mutação."""
     decision = state.get("decision") or ""
     justification = state.get("decision_justification") or ""
     action_type = state.get("action_type")
     action_target = state.get("action_target")
     user_id = state.get("user_id") or ""
-    case_id = state.get("case_id") or ""
 
-    # 1. Pede confirmação humana antes de qualquer mutação
+    # 1. Confirmação humana antes de qualquer mutação de impacto.
     confirmed = interrupt({
         "type": "action_confirmation",
         "decision": decision,
@@ -401,39 +640,45 @@ def act(state: AgentState) -> dict:
     })
 
     if not confirmed:
+        record_node("act.execution", **{"action.confirmed": False, "final.decision": "escalate"})
         return {
             "decision": "escalate",
             "decision_justification": (
-                f"Ação '{action_type}' no '{action_target}' cancelada pelo humano. "
+                f"Ação '{action_type}' em '{action_target}' cancelada pelo humano. "
                 f"Justificativa original: {justification[:200]}"
             ),
             "trace": [{"node": "act", "action": "cancelled_by_human",
                        "action_type": action_type, "action_target": action_target}],
         }
 
-    # 2. Executa a ação real na API
     if not action_type or not action_target:
+        record_node("act.execution", **{"action.confirmed": True, "action.executed": False})
         return {
             "trace": [{"node": "act", "action": "skipped",
                        "reason": "action_type ou action_target ausente"}],
         }
 
-    # Para escalate, usa case_id; para as demais, o action_target
-    effective_target = case_id if action_type == "escalate" else action_target
-    method, path = _build_action_url(action_type, effective_target)
-
+    # 2. Executa a ação real, via tool MCP.
+    tool, args = _build_action_call(action_type, action_target)
+    if action_type == "update_config":
+        # A única mutação que exige um corpo de mudanças além da justificativa.
+        args["changes"] = {}
     try:
-        result = tractian_request(
-            method=method,
-            path=path,
-            user_id=user_id,
-            json_data={"justification": justification},
-        )
-        action_id = result.get("action_id", "?")
-        message = result.get("message", "")
+        result = call_tool(tool, user_id=user_id, justification=justification, **args)
+        # A API pode recusar legitimamente (ex.: 403 quando o usuário não tem a
+        # permissão exigida). Isso volta como envelope, não como exceção.
+        status = result.get("http_status")
+        ok = status is None
+        action_id = result.get("action_id") if ok else None
+        message = result.get("message", "") if ok else str(result.get("notes", ""))
     except Exception as e:
-        action_id = None
-        message = f"ERRO {e}"
+        action_id, message, ok = None, f"falha na tool MCP: {e}", False
+
+    record_node("act.execution", **{
+        "action.confirmed": True, "action.executed": ok,
+        "action.type": action_type, "action.target": action_target,
+        "final.decision": "act",
+    })
 
     return {
         "trace": [{"node": "act", "action": decision, "action_type": action_type,
@@ -443,25 +688,38 @@ def act(state: AgentState) -> dict:
 
 
 def escalate(state: AgentState) -> dict:
-    """Nó de escalonamento: encaminha para humano."""
+    """Encaminha para humano — e registra o escalonamento na plataforma.
+
+    Antes este nó só escrevia no trace: `POST /cases/{id}/escalate` nunca era
+    chamado, embora o gabarito o espere. Escalar é a ação segura, por isso não
+    passa por HITL (o `interrupt()` fica para as mutações de impacto).
+    """
+    case_id = state.get("case_id") or ""
+    justification = state.get("decision_justification") or "Escalonamento automático do agente."
+
+    action_id, message, ok = None, "", False
+    if case_id:
+        try:
+            result = call_tool(
+                "escalateCase",
+                caseId=case_id,
+                user_id=state.get("user_id") or "",
+                justification=justification,
+            )
+            status = result.get("http_status")
+            ok = status is None
+            action_id = result.get("action_id") if ok else None
+            message = result.get("message", "") if ok else str(result.get("notes", ""))
+        except Exception as e:
+            message = f"falha na tool MCP: {e}"
+
+    record_node("escalate.registro", **{"final.decision": "escalate", "escalate.registered": ok})
+
     return {
-        "trace": [{"node": "escalate",
-                   "reason": (state.get("decision_justification") or "")[:120]}],
+        "trace": [{"node": "escalate", "reason": justification[:120],
+                   "api_result": message, "action_id": action_id, "registered": ok,
+                   # Um escalonamento recusado por permissão continua sendo a
+                   # decisão certa do agente: o que falta é um humano com o
+                   # perfil adequado assumir o caso.
+                   "needs_authorized_user": (not ok) and "403" in str(message)}],
     }
-
-
-# System prompt do agente
-SYSTEM_PROMPT = """Você é um engenheiro de suporte da TRACTIAN. Você recebe tickets de clientes
-e precisa investigar dados de ativos industriais para orientar, agir ou escalar.
-
-## Regras
-1. Sempre fundamente sua resposta nas evidências coletadas. Use A PENA os dados fornecidos.
-2. Nunca invente dados. Se houver lacunas de dados, considere-as na sua decisão.
-3. Ao escalar, explique por que o caso extrapola o atendimento remoto.
-
-## Decisão
-- ORIENTAR: explicar ao cliente, sem alterar nada.
-- AGIR: executar ação (reprocessar análise, solicitar especialista, retreinar modelo). Justifique com >= 20 caracteres.
-- ESCALAR: encaminhar a humano. Use quando dados críticos faltarem ou o caso for grave.
-
-Responda iniciando com a palavra da decisão (ORIENTAR/AGIR/ESCALAR) seguida do texto."""
