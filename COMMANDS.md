@@ -151,3 +151,89 @@ TRACTIAN_API_URL=http://localhost:8000
 make agent-env
 # Edite 'agent/.env' com suas credenciais
 ```
+
+---
+
+## Observabilidade
+
+### `make up-obs`
+
+> **Descrição:** Sobe a stack de observabilidade inteira e espera o Phoenix ficar pronto.
+> **O que ele faz:**
+> 1. Sobe Postgres (`:5432`) e Phoenix (`:6006`) via Docker.
+> 2. Aguarda o Phoenix aceitar conexões — sem isso o primeiro lote de spans se perde.
+> 3. Cria a tabela `execucoes`.
+>
+> O Phoenix persiste os traces **no mesmo Postgres**, em schema separado, então eles
+> sobrevivem a `docker compose restart`.
+
+```bash
+make up-obs
+```
+
+> **Lembrete:** o tracing só liga com `PHOENIX_ENABLED=1` em `agent/.env`. Se estiver ligado e
+> a instrumentação falhar, o programa para com a causa na tela — falha silenciosa aqui é
+> indistinguível de "não há o que tracear".
+
+## Avaliação
+
+### `make eval` · `make run`
+
+> `eval` roda o split de treino **sem** o juiz LLM — rápido, para desenvolvimento.
+> `run` roda o mesmo split **com** o juiz.
+
+```bash
+make eval
+make run
+```
+
+### `make derivados`
+
+> **Descrição:** Roda os seis cenários construídos neste projeto, sobre ativos que o case
+> original não usa.
+> **Atenção:** o resultado é reportado **à parte**. Um gabarito escrito por quem também
+> escreveu o agente pode favorecê-lo sem intenção — nunca some com os números dos 17 originais.
+
+```bash
+make derivados
+```
+
+### `make prova-final`
+
+> **Descrição:** Roda o split de teste *held-out* — os 4 tickets que nunca foram usados no
+> desenvolvimento.
+> **Regra:** roda **uma vez só**, no fim. Ajustar o agente depois de ver esse resultado
+> transforma aqueles tickets em treino, e não existe mais conjunto limpo.
+
+```bash
+make prova-final
+```
+
+### `make evolucao` · `make evolucao-md`
+
+> **Descrição:** Tabela de evolução entre versões, juntando a tabela `execucoes` do Postgres
+> com as anotações do juiz gravadas no Phoenix. A versão `-md` sai em markdown.
+
+```bash
+make evolucao
+make evolucao --modelos     # agrupa pelo modelo que de fato respondeu
+```
+
+> O `--modelos` existe porque roteadores escolhem o modelo por requisição. Sem ele, uma média
+> da rodada mistura modelos com vieses diferentes.
+
+## Medição de custo e latência
+
+O cache de decisões devolve resultados do disco sem chamar o LLM. Para medir custo e latência
+**reais**, é obrigatório desligá-lo — senão você mede o tempo de ler um JSON.
+
+```bash
+.venv\Scripts\python.exe -m eval.runner --split train --no-cache
+```
+
+## Testes
+
+```bash
+.venv\Scripts\python.exe -m pytest tests/ -q     # 73 testes do agente, sem chamar LLM
+make test                                          # 39 testes da API industrial
+```

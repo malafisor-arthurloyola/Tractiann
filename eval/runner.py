@@ -307,7 +307,8 @@ def main():
     parser.add_argument("--no-judge", action="store_true", help="Pula avaliação subjetiva")
     parser.add_argument("--no-cache", action="store_true",
                         help="Ignora o cache de decisões — obrigatório para medir custo e latência reais")
-    parser.add_argument("--output", type=str, default="eval/results.json", help="Arquivo de saída")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Arquivo de saída (padrão: eval/results-<split>.json)")
     args = parser.parse_args()
 
     if args.no_cache:
@@ -325,7 +326,9 @@ def main():
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         output = run_all(split=args.split, run_judge=not args.no_judge)
-        out_path = args.output if args.split == "all" else f"eval/results-{args.split}.json"
+        # `--output` valia só para o split "all", então rodadas repetidas do mesmo
+        # split se sobrescreviam — inviabilizando medir variância entre execuções.
+        out_path = args.output or f"eval/results-{args.split}.json"
         Path(out_path).write_text(
             json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8"
         )

@@ -1,11 +1,12 @@
-# Evolução do Agente — v1 a v6
+# Evolução do Agente — v1 a v7
 
 Registro versionado do desempenho do agente industrial. Cada versão foi **medida**
 no split de treino (13 tickets) antes e depois de cada mudança, com o gabarito
 `eval/expected-paths.json` como referência.
 
-> Metodologia: o split de teste (4 tickets) é *held-out* e não aparece aqui — só
-> roda na prova final. Todo número desta página vem do treino.
+> Metodologia: o split de teste (4 tickets) é *held-out* — só roda na prova final, uma
+> vez. Os números da seção **Resultados finais**, no fim desta página, cobrem os três
+> conjuntos; todo o resto vem do treino.
 
 ---
 
@@ -19,6 +20,7 @@ no split de treino (13 tickets) antes e depois de cada mudança, com o gabarito
 | v4 | 10/13 — 77% | correções no juiz e no idioma |
 | **v5** | **11/13 — 85%** | camada MCP como interface real |
 | v6 | *ver ressalva* | andaime de evidência nas respostas |
+| **v7** | **9/13 — 69%** | curadoria do balanço · **zero erros arriscados** |
 
 **O salto que conta a história: 31% → 85%.** A oscilação de ±1 caso entre v3, v4 e
 v5 é ruído de temperatura (`temperature=0.3`), não sinal.

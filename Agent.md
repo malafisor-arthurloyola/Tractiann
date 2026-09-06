@@ -57,7 +57,7 @@ Avaliação: determinística (trajetória vs gabarito) + Juiz LLM (qualidade/seg
 Relatório de resultados (custo, latência, acurácia, trade-offs)
 ```
 
-Durante o desenvolvimento, usar **LangSmith** para visualizar o trace de cada nó do grafo e debugar sem precisar ler a implementação interna do LangGraph.
+Durante o desenvolvimento, usar **Phoenix** (Arize) para visualizar o trace de cada nó do grafo e debugar sem precisar ler a implementação interna do LangGraph. Substituiu a LangSmith por ser open source e não exigir conta paga.
 
 ## Mapeamento API → Tools MCP (17 operações, 7 categorias)
 
@@ -87,7 +87,7 @@ Durante o desenvolvimento, usar **LangSmith** para visualizar o trace de cada n�
 - **Human-in-the-loop**: `interrupt()` do LangGraph, disparado antes de qualquer tool marcada com ⚠️ (ação de impacto) — pausa a execução até confirmação humana
 - **Camada de tools**: MCP — expõe as 17 operações da API de forma padronizada
 - **Log de execuções**: Postgres — tabela `execucoes` (ticket, versão do agente, trace completo, decisão final, timestamp) pra comparar métricas entre versões
-- **Observabilidade em dev**: LangSmith — trace visual node-a-node (parte do plano principal, não opcional — essencial pra debugar sem precisar ler log bruto)
+- **Observabilidade em dev**: Phoenix — trace visual node-a-node, com os spans das chamadas HTTP à API industrial e os atributos de domínio de cada nó
 - **Avaliação**: parte determinística (trajetória vs `eval/expected-paths.json`) + juiz LLM (qualidade/segurança), rodando os 17 cenários de `docs/test-scenarios.md`
 - **Interface de demo**: Streamlit
 
@@ -99,15 +99,33 @@ Durante o desenvolvimento, usar **LangSmith** para visualizar o trace de cada n�
 - **Estrutura descoberta no Makefile**: o projeto espera uma pasta `agent/` na raiz, com `agent/server.py` (entrada do agente/UI, sobe na porta 8001) e `agent/.env` (criado via `make agent-env` a partir de um `agent/.env.example` que você mesmo cria, com `OPENAI_API_KEY`/`BASE_URL`/`MODEL`). Nenhuma dessas pastas/arquivos existe ainda — é o aluno quem cria.
 - Testes: _a definir_
 
-## Status atual / próximos passos
+## Status atual
 
-- [ ] Criar pasta `agent/` com `.env.example`
-- [x] Primeira tool MCP (`get_baseline`) — esqueleto andante
-- [ ] Demais 16 tools MCP
-- [ ] Grafo LangGraph (nós: investigar, decidir, responder/agir/escalar)
-- [ ] Human-in-the-loop (`interrupt()`) antes de ações `action_high`
-- [ ] Integração de tracing (LangSmith)
-- [ ] Schema Postgres pra log de execuções
-- [ ] Harness de avaliação (determinístico + juiz LLM)
-- [ ] Interface de demo (Streamlit)
-- [ ] README final com metodologia, resultados e limitações
+Todos os itens do plano original foram entregues, e alguns extrapolaram o escopo inicial.
+
+- [x] Pasta `agent/` com `.env.example`
+- [x] As 18 tools MCP — servidor sobe via stdio, consumido por `agent/tools/mcp_client.py`
+- [x] Grafo LangGraph (investigate → quality_check → decide → respond/act/escalate)
+- [x] Human-in-the-loop com `interrupt()` antes de qualquer mutação
+- [x] Tracing — **Phoenix** no lugar da LangSmith (open source, sem conta paga)
+- [x] Schema Postgres para log de execuções, com `agent_version` para comparar versões
+- [x] Harness de avaliação: determinística + juiz LLM, com split treino/teste
+- [x] Interface Streamlit
+- [x] README com metodologia, resultados e limitações
+
+Além do previsto:
+
+- [x] Cadeia de **fallback entre provedores** de LLM — a cota gratuita estourou no meio de
+      uma avaliação e derrubou 5 de 13 tickets
+- [x] Registro do **modelo que de fato respondeu** cada ticket — roteadores escolhem por
+      requisição, e sem isso a métrica vira média sobre uma mistura desconhecida
+- [x] **Juiz independente**, em provedor separado do agente, para medir viés de autoavaliação
+- [x] Classificação de erro em **conservador vs arriscado**, pela escada de consequência
+- [x] Seis **cenários derivados** sobre ativos que o case original não usa, reportados à parte
+
+## Onde ler os resultados
+
+- [`docs/EVOLUCAO.md`](./docs/EVOLUCAO.md) — as sete versões, o que mudou em cada uma e as ressalvas
+- [`README.md`](./README.md) — resumo, arquitetura e como rodar
+- [`docs/adr/ADR-0001-mcp-as-interface.md`](./docs/adr/ADR-0001-mcp-as-interface.md) — a decisão
+  sobre MCP e o histórico de quando ela passou a valer de fato
