@@ -8,7 +8,7 @@ Este documento serve como uma referência rápida para os comandos mais importan
 
 &gt; **Descrição:** Este comando realiza a configuração inicial completa do ambiente. Deve ser executado apenas uma vez, ou se você precisar resetar e reinstalar tudo.
 &gt; **O que ele faz:**
-&gt; 1.  Cria o ambiente virtual Python (`api/.venv`).
+&gt; 1.  Cria o ambiente virtual Python (`.venv`).
 &gt; 2.  Instala todas as dependências do projeto (API e agente) usando `uv`.
 &gt; 3.  Gera os dados sintéticos (`data/`, `agent-input/`, `eval/`).
 
@@ -55,7 +55,7 @@ make data
 
 ### `make clean`
 
-&gt; **Descrição:** Para a API, apaga todos os dados gerados (`data/`, `agent-input/`, `eval/`) e remove o ambiente virtual (`api/.venv`).
+&gt; **Descrição:** Para a API, apaga todos os dados gerados (`data/`, `agent-input/`, `eval/`) e remove o ambiente virtual (`.venv`).
 
 ```bash
 make clean

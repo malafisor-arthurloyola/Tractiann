@@ -5,14 +5,13 @@ Uso:
     python -m eval.compare --versions     # lista versões e contagens
 """
 import argparse
-import json
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / "agent" / ".env")
 
-from agent.logging.postgres import count_by_version, compare_versions, query
+from agent.logging.postgres import count_by_version, compare_versions
 
 
 def print_table(rows, cols=None):

@@ -6,7 +6,8 @@ Como executar o projeto completo: API Industrial + Agente IA + Observabilidade +
 
 ## Requisitos
 
-- **Python ≥ 3.11** (usado via `uv`)
+- **Python 3.11 ou 3.12** — o `make setup` baixa a versão certa via `uv`.
+  Não use 3.13+: as bibliotecas de instrumentação do Phoenix ainda não o suportam.
 - **Docker Desktop** (para Postgres + Phoenix)
 - **uv** (gerenciador rápido de pacotes): `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - **Make** (GnuWin32 no Windows já incluído no PATH do projeto)
@@ -43,12 +44,17 @@ make up              # Sobe API em http://localhost:8000
 make ui              # Sobe Streamlit em http://localhost:8501
 
 # PostgreSQL (logging de execuções + comparação de versões)
+make up-obs          # Sobe Postgres + Phoenix juntos e cria a tabela (recomendado)
+
+# Ou individualmente:
 make postgres-up     # Sobe container postgres-agent
 make postgres-init   # Cria tabela `execucoes`
 
 # Phoenix Tracing (observabilidade open-source, substitui LangSmith)
 make phoenix-up      # Dashboard em http://localhost:6006
 # IMPORTANTE: Set PHOENIX_ENABLED=1 no agent/.env para instrumentar traces
+# Os traces são persistidos no MESMO Postgres (schema `phoenix`), então
+# sobrevivem a `docker compose restart phoenix`.
 ```
 
 ---
@@ -146,18 +152,22 @@ make ui
 make eval
 # ou: make run          # Com juiz LLM (mais lento, usa API)
 
+# Medição de custo e latência REAIS — obrigatório desligar o cache, senão não
+# há chamada de LLM para medir:
+.venv\Scripts\python.exe -m eval.runner --split train --no-cache
+
 # Avaliação no TESTE held-out (4 tickets, generalização)
 make prova-final
 
 # Testes unitários do agente (32 testes, sem LLM, ~2s)
-.\api\.venv\Scripts\python.exe -m pytest tests/test_agent.py -v
+.\.venv\Scripts\python.exe -m pytest tests/test_agent.py -v
 
 # Testes da API Industrial (39 testes)
 make test
-# ou: cd api && .venv\Scripts\python.exe -m pytest -q
+# ou: cd api && ..\.venv\Scripts\python.exe -m pytest -q
 ```
 
-**Total: 71 testes** (32 agente + 39 API)
+**Total: 90 testes** (51 agente + 39 API)
 
 ---
 
@@ -240,6 +250,8 @@ Tractiann/
 | `ModuleNotFoundError: agent` | PYTHONPATH errado | Rode `make setup` ou use `make ui`/`make eval` |
 | `Connection refused: localhost:5432` | Postgres não subiu | `make postgres-up && make postgres-init` |
 | `Phoenix shows no traces` | PHOENIX_ENABLED=0 | Edite `agent/.env` → `PHOENIX_ENABLED=1` |
+| `PHOENIX_ENABLED=1 mas a instrumentação falhou` | deps do agente ausentes | `uv pip install -e .` (o erro diz a causa; antes falhava calado) |
+| Traces somem ao reiniciar o Phoenix | compose antigo sem `PHOENIX_SQL_DATABASE_URL` | Use o `docker-compose.yml` atual e `make up-obs` |
 | `seed=complete` não funciona | Parâmetro só existe em endpoints GET | Use Swagger UI ou `curl '...?seed=complete'` |
 
 ---

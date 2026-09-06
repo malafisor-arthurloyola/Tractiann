@@ -15,19 +15,17 @@ def _core_count() -> int:
 def route_after_quality(state: AgentState) -> str:
     """Roteamento após quality check.
 
-    - ok / partial / unavailable → decide (O decide lida com unavailable)
-    - incomplete + ainda há next_tool → investigate (busca a tool específica que falta)
-    - incomplete sem next_tool → decide (ciente das lacunas)
-    """
-    verdict = state.get("quality_verdict", "ok")
+    Enquanto houver evidência compensatória a buscar e orçamento de rodadas,
+    volta para `investigate`. Caso contrário segue para `decide` — que decide
+    sempre, ciente das lacunas.
 
-    if verdict == "incomplete" and state.get("next_tool"):
+    O quality_check não bloqueia mais: nenhum veredicto manda direto para
+    `escalate`. Quem decide escalar é o LLM, olhando a evidência real.
+    """
+    if state.get("next_tool"):
         calls = state.get("tools_called") or []
         if len(calls) - _core_count() < MAX_RETRIES:
             return "investigate"
-
-    # Todas as outras situações vão para decide
-    # (decide lida com unavailable → escalate internamente)
     return "decide"
 
 
@@ -47,9 +45,8 @@ def build_graph() -> StateGraph:
     Fluxo:
     investigate → quality_check → decide → (respond | act | escalate)
                          ↓
-              incomplete + próxima tool → investigate (busca só a tool que falta)
-              incomplete sem back-ups    → decide (ciente das lacunas)
-              unavailable                → escalate
+              há evidência compensatória e orçamento → investigate
+              caso contrário                          → decide (ciente das lacunas)
     """
     graph = StateGraph(AgentState)
 
@@ -69,7 +66,6 @@ def build_graph() -> StateGraph:
         {
             "decide": "decide",
             "investigate": "investigate",
-            "escalate": "escalate",
         },
     )
     graph.add_conditional_edges(

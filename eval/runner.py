@@ -5,6 +5,7 @@ Uso:
     python -m eval.runner --case TKT-INV-04  # roda um caso específico
 """
 import json
+import os
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
@@ -15,12 +16,14 @@ load_dotenv(Path(__file__).resolve().parent.parent / "agent" / ".env")
 from langgraph.types import Interrupt, Command
 
 from agent.graph.agent import agent_graph
-from agent.logging.phoenix import setup_phoenix_tracing, run_in_phoenix_trace
-from eval.assertions.trajectory import assert_trajectory, load_expected_paths
+from agent.logging.phoenix import flush as phoenix_flush
+from agent.logging.phoenix import run_in_phoenix_trace, setup_phoenix_tracing
+from eval.assertions.trajectory import (
+    assert_trajectory,
+    expected_decision,
+    load_expected_paths,
+)
 from eval.judge.llm_judge import judge_response
-
-# Instrumenta tracing (Phoenix) se ativado — opcional, não quebra sem o servidor
-setup_phoenix_tracing()
 
 
 def run_graph(state: dict) -> dict:
@@ -76,7 +79,7 @@ def run_single(case: dict, expected: dict, run_judge: bool = True) -> dict:
     """
     # 1. Executa o agente (aprova automaticamente qualquer interrupt — HITL)
     try:
-        with run_in_phoenix_trace(case["id"], case["ticket_id"]):
+        with run_in_phoenix_trace(case["id"], case["ticket_id"], asset_id=case.get("asset_id")):
             result = run_graph(build_initial_state(case))
     except Exception as e:
         return {
@@ -99,9 +102,13 @@ def run_single(case: dict, expected: dict, run_judge: bool = True) -> dict:
                 gaps=result.get("data_gaps") or {},
                 response=result.get("response") or "",
                 decision=result.get("decision") or "",
+                root_question=expected.get("root_question"),
             )
         except Exception as e:
-            judge = {"error": str(e), "nota_geral": 0}
+            # Sem `nota_geral`: uma falha do juiz é AUSÊNCIA de nota, não nota zero.
+            # Contar como 0 puxava a média para baixo por um erro transitório do
+            # provedor, não por qualidade ruim da resposta do agente.
+            judge = {"error": str(e)}
 
     return {
         "case_id": case["id"],
@@ -158,10 +165,11 @@ def run_all(split: str = "train", run_judge: bool = True) -> dict:
     Args:
         split: 'train' (padrão, desenvolvimento) | 'test' (held-out, prova final) | 'all'
         run_judge: inclui avaliação subjetiva (LLM judge)
-    
+
     Returns:
         dict com results (lista), summary (métricas agregadas)
     """
+    setup_phoenix_tracing()
     cases_path = Path("agent-input/cases.json")
     cases = json.loads(cases_path.read_text(encoding="utf-8"))
     cases = filter_cases(cases, split)
@@ -174,8 +182,12 @@ def run_all(split: str = "train", run_judge: bool = True) -> dict:
     for case in cases:
         exp = expected_map.get(case["id"], {})
         result = run_single(case, exp, run_judge=run_judge)
+        result["expected_decision"] = expected_decision(exp)
         _log_result(case, result, AGENT_VERSION)
         results.append(result)
+
+    # Garante que os spans do lote saiam antes do processo terminar.
+    phoenix_flush()
 
     # Métricas agregadas
     from collections import Counter
@@ -184,12 +196,25 @@ def run_all(split: str = "train", run_judge: bool = True) -> dict:
     traj_scores = [r["trajectory"]["score"] for r in results if r.get("trajectory")]
     judge_scores = [r["judge"]["nota_geral"] for r in results if r.get("judge") and "nota_geral" in r["judge"]]
 
+    # Acurácia de decisão: a métrica de topo. O trajectory_avg_score dilui o
+    # acerto da decisão entre outros critérios e mascarava o desempenho real.
+    graded = [r for r in results if r.get("expected_decision")]
+    hits = [r for r in graded if r["expected_decision"] == r.get("decision")]
+    confusion = Counter(
+        (r["expected_decision"], str(r.get("decision"))) for r in graded
+    )
+
     summary = {
         "total": len(results),
+        "decision_accuracy": round(len(hits) / len(graded), 3) if graded else 0,
+        "decision_hits": f"{len(hits)}/{len(graded)}",
         "decisions": dict(decisions),
         "verdicts": dict(verdicts),
-        "trajectory_avg_score": sum(traj_scores) / len(traj_scores) if traj_scores else 0,
-        "judge_avg_score": sum(judge_scores) / len(judge_scores) if judge_scores else 0,
+        "trajectory_avg_score": round(sum(traj_scores) / len(traj_scores), 3) if traj_scores else 0,
+        "judge_avg_score": round(sum(judge_scores) / len(judge_scores), 2) if judge_scores else 0,
+        "judge_coverage": f"{len(judge_scores)}/{len(results)}",
+        # esperado → real, para ver de que lado o agente erra
+        "confusion": {f"{exp}->{real}": n for (exp, real), n in sorted(confusion.items())},
     }
 
     return {"results": results, "summary": summary}
@@ -197,15 +222,28 @@ def run_all(split: str = "train", run_judge: bool = True) -> dict:
 
 def main():
     import argparse
+
+    # O console do Windows usa cp1252 e quebra ao imprimir a resposta do LLM
+    # (travessões, aspas curvas, hífen não-separável). Força UTF-8 na saída.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description="Runner de avaliação do agente Tractian")
     parser.add_argument("--case", type=str, help="Roda um caso específico (ticket_id)")
     parser.add_argument("--split", choices=["train", "test", "all"], default="train",
                         help="Split a rodar (padrão: train — o teste é held-out)")
     parser.add_argument("--no-judge", action="store_true", help="Pula avaliação subjetiva")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Ignora o cache de decisões — obrigatório para medir custo e latência reais")
     parser.add_argument("--output", type=str, default="eval/results.json", help="Arquivo de saída")
     args = parser.parse_args()
 
+    if args.no_cache:
+        os.environ["AGENT_LLM_CACHE"] = "0"
+
     if args.case:
+        setup_phoenix_tracing()
         cases = json.loads(Path("agent-input/cases.json").read_text(encoding="utf-8"))
         case = next((c for c in cases if c["ticket_id"] == args.case), None)
         if not case:

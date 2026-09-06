@@ -6,7 +6,6 @@ Schema:
 """
 import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -14,15 +13,51 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
+# Motivo da última falha de conexão. Guardado porque `_get_connection` devolve
+# None para causas muito diferentes (driver ausente, banco fora do ar, senha
+# errada) e antes não havia como distingui-las — o badge da UI ficava cinza sem
+# dizer o porquê.
+_last_error: str | None = None
+
+
 def _get_connection():
-    """Retorna conexão com Postgres usando psycopg2."""
+    """Retorna conexão com Postgres usando psycopg2, ou None em caso de falha.
+
+    A causa da falha fica em `_last_error` e é exposta por `check_health()`.
+    """
+    global _last_error
     try:
         import psycopg2
-        return psycopg2.connect(os.getenv("DATABASE_URL", "postgresql://localhost:5432/tractian_agent"))
-    except ImportError:
+    except ImportError as e:
+        _last_error = f"psycopg2 não instalado ({e}) — rode `uv pip install -e .`"
         return None
+
+    url = os.getenv("DATABASE_URL", "postgresql://localhost:5432/tractian_agent")
+    try:
+        conn = psycopg2.connect(url)
+        _last_error = None
+        return conn
+    except Exception as e:
+        # A URL pode conter senha; reporta só o host/porta.
+        safe = url.rsplit("@", 1)[-1] if "@" in url else url
+        _last_error = f"{type(e).__name__} ao conectar em {safe}: {str(e).strip()[:160]}"
+        return None
+
+
+def check_health() -> tuple[bool, str]:
+    """Testa a conexão e devolve (ok, motivo).
+
+    Interface pública para a UI e o Makefile — evita que consumidores chamem
+    `_get_connection` diretamente só para saber se o banco responde.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return False, _last_error or "causa desconhecida"
+    try:
+        conn.close()
     except Exception:
-        return None
+        pass
+    return True, "conectado"
 
 
 def init_db():
@@ -137,7 +172,7 @@ def count_by_version() -> dict:
     return {r["agent_version"]: r["n"] for r in rows}
 
 
-def summary_by_version(agent_version: str) -> dict:
+def summary_by_version(agent_version: str) -> list:
     """Resumo agregado de decisões/veredictos de uma versão."""
     rows = query(
         """SELECT decision, quality_verdict, COUNT(*) AS n

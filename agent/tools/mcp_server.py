@@ -1,4 +1,17 @@
+"""Servidor MCP — a interface entre o agente e a API industrial (ADR-0001).
+
+As 18 operações da API viram tools MCP. O agente **não** chama a API direto:
+ele sobe este servidor via stdio e conversa pelo protocolo MCP
+(ver `agent/tools/mcp_client.py`).
+
+O `client.py` continua existindo, mas passa a ser detalhe interno **deste**
+servidor: é ele quem centraliza base URL, header `x-user-id` e erro HTTP.
+
+Rodar isolado (útil para depurar as tools sem o agente):
+    python -m agent.tools.mcp_server
+"""
 from mcp.server.mcpserver import MCPServer
+
 from .client import tractian_request
 
 mcp = MCPServer(name="tractian-tools")
@@ -150,3 +163,10 @@ def escalateCase(caseId: str, user_id: str, justification: str, params: dict | N
         user_id=user_id,
         json_data={"justification": justification, "params": params or {}}
     )
+
+
+if __name__ == "__main__":
+    # stdio é o transporte padrão do MCP: o agente sobe este processo e
+    # conversa por stdin/stdout. Sem este bloco o módulo apenas define as
+    # tools e encerra — foi o que fazia o cliente falhar com TaskGroup error.
+    mcp.run(transport="stdio")

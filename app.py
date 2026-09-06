@@ -37,11 +37,21 @@ load_dotenv(ROOT / "agent" / ".env")
 # ── Imports do projeto ───────────────────────────────────────────────────────
 from agent.graph.agent import agent_graph
 from agent.graph.state import AgentState
-from agent.logging.postgres import log_execution, count_by_version, compare_versions, _get_connection
+from agent.logging.postgres import log_execution, count_by_version, compare_versions
+from agent.logging.postgres import check_health as postgres_health
+from agent.logging.phoenix import setup_phoenix_tracing, run_in_phoenix_trace
 from agent.version import AGENT_VERSION
 from eval.runner import build_initial_state, load_expected_paths, run_single
 from eval.assertions.trajectory import assert_trajectory
 from langgraph.types import Command
+
+# ── Observabilidade ──────────────────────────────────────────────────────────
+# Precisa ser explícito: sem isto a demo final não gera trace nenhum, porque
+# as invocações da UI não passam pelo eval/runner.
+@st.cache_resource
+def _init_tracing() -> bool:
+    return setup_phoenix_tracing()
+
 
 # ── Constantes & Configuração ────────────────────────────────────────────────
 CASES_PATH = ROOT / "agent-input" / "cases.json"
@@ -296,19 +306,19 @@ def check_api_health() -> Dict[str, Any]:
 
 @st.cache_data(ttl=5)
 def check_postgres_health() -> Dict[str, Any]:
-    """Verifica conectividade com PostgreSQL."""
-    conn = _get_connection()
-    if conn:
-        conn.close()
+    """Verifica conectividade com PostgreSQL, reportando a causa da falha."""
+    ok, motivo = postgres_health()
+    if ok:
         return {"online": True, "msg": "Postgres :5432 Conectado"}
-    return {"online": False, "msg": "Postgres :5432 Offline"}
+    return {"online": False, "msg": "Postgres :5432 Offline", "detail": motivo}
 
 
 @st.cache_data(ttl=5)
 def check_phoenix_health() -> Dict[str, Any]:
-    """Verifica se o Phoenix Tracing (:6006) está acessível."""
+    """Verifica se o Phoenix Tracing está acessível (respeita PHOENIX_ENDPOINT)."""
+    endpoint = os.getenv("PHOENIX_ENDPOINT", "http://localhost:6006")
     try:
-        resp = httpx.get("http://localhost:6006", timeout=1.0)
+        resp = httpx.get(endpoint, timeout=1.0)
         if resp.status_code in (200, 302, 307):
             return {"online": True, "msg": "Phoenix :6006 Ativo"}
         return {"online": False, "msg": "Phoenix :6006 Inativo"}
@@ -360,16 +370,32 @@ def execute_agent_stepwise(case: Dict[str, Any]) -> Tuple[Dict[str, Any], float,
     Executa o grafo do agente mantendo checkpoint no LangGraph MemorySaver.
     Retorna (result_or_interrupted_state, elapsed_time, is_interrupted).
     """
+    _init_tracing()
     start = time.time()
     state = build_initial_state(case)
-    thread_id = case["ticket_id"]
+    ticket_id = case["ticket_id"]
+
+    # thread_id novo a cada execução: o MemorySaver guarda o checkpoint por
+    # thread, então reusar o ticket_id fazia a re-execução cair num checkpoint
+    # antigo (já pausado ou finalizado). O id fica na sessão para o resume do
+    # HITL retomar exatamente esta execução.
+    thread_id = f"{ticket_id}-{int(time.time() * 1000)}"
+    st.session_state[f"thread_{ticket_id}"] = thread_id
     config = {"configurable": {"thread_id": thread_id}}
 
-    result = agent_graph.invoke(state, config=config)
+    with run_in_phoenix_trace(thread_id, ticket_id, asset_id=case.get("asset_id")):
+        result = agent_graph.invoke(state, config=config)
     elapsed = time.time() - start
 
     # Verifica se o grafo pausou em um interrupt() do HITL
     if "__interrupt__" in result:
+        # Registra já na pausa: um ticket abandonado no interrupt (o operador
+        # nunca confirma nem cancela) sumia do histórico do Postgres, porque só
+        # o caminho completo e o resume gravavam.
+        try:
+            log_execution(result, agent_version=AGENT_VERSION)
+        except Exception:
+            pass
         return result, elapsed, True
 
     # Gravação no Postgres se a execução terminou
@@ -383,8 +409,11 @@ def execute_agent_stepwise(case: Dict[str, Any]) -> Tuple[Dict[str, Any], float,
 
 def resume_agent_action(ticket_id: str, confirm: bool) -> Dict[str, Any]:
     """Retoma a execução do grafo após confirmação ou cancelamento humano."""
-    config = {"configurable": {"thread_id": ticket_id}}
-    resumed = agent_graph.invoke(Command(resume=confirm), config=config)
+    # Mesmo thread_id da execução que pausou (ver execute_agent_stepwise).
+    thread_id = st.session_state.get(f"thread_{ticket_id}", ticket_id)
+    config = {"configurable": {"thread_id": thread_id}}
+    with run_in_phoenix_trace(thread_id, ticket_id):
+        resumed = agent_graph.invoke(Command(resume=confirm), config=config)
     try:
         log_execution(resumed, agent_version=AGENT_VERSION)
     except Exception:
@@ -781,7 +810,7 @@ def render_response(result: Dict[str, Any], case: Dict[str, Any]):
             jc3.metric("Fundamentação", f"{je.get('fundamentacao', 0)}/10")
             jc4.metric("Segurança", f"{je.get('seguranca', 0)}/10")
             jc5.metric("Nota Geral", f"{je.get('nota_geral', 0)}/10")
-            st.info(f"<b>Parecer do Juiz:</b> {je.get('razao', '—')}", icon="⚖️")
+            st.info(f"**Parecer do Juiz:** {je.get('razao', '—')}", icon="⚖️")
 
 
 def tab_diagnostico(case: Dict[str, Any], result: Optional[Dict[str, Any]], elapsed: Optional[float], is_interrupted: bool):
@@ -1273,7 +1302,7 @@ def tab_playground(cases: List[Dict[str, Any]]):
         st.markdown("<hr style='border-color:#2d3142; margin:20px 0;'>", unsafe_allow_html=True)
         render_result_cards(res, el)
         render_hitl_section(c_case.get("ticket_id", "custom"), res, inter)
-        render_response(res)
+        render_response(res, c_case)
 
 
 # ── Função Principal ─────────────────────────────────────────────────────────

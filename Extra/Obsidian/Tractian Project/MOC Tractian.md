@@ -26,6 +26,8 @@ aliases: [Mapa de Conteúdo, Índice do Projeto, MOC]
 - [[Human-in-the-loop]]
 - [[Avaliação do Agente]]
 - [[Observabilidade Postgres LangSmith Phoenix]]
+- [[Evidência Compensatória]]
+- [[Ambiente e Reprodutibilidade]]
 - [[Streamlit Interface]]
 
 ## 🛠️ Implementação e Correções
