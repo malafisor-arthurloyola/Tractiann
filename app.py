@@ -735,6 +735,10 @@ def render_hitl_section(ticket_id: str, result: Dict[str, Any], is_interrupted: 
         action_type = interrupt_info.get("action_type") or result.get("action_type") or "Ação de Plataforma"
         action_target = interrupt_info.get("action_target") or result.get("action_target") or "Alvo não especificado"
         justification = interrupt_info.get("justification") or result.get("decision_justification") or ""
+        # O `interrupt` já carrega as lacunas, e elas são o que mais deveria pesar
+        # na decisão do operador: aprovar uma mutação sabendo que o baseline não
+        # veio é diferente de aprovar com a evidência completa.
+        gaps_hitl = interrupt_info.get("gaps") or result.get("data_gaps") or {}
 
         st.markdown(f"""
         <div class="hitl-banner">
@@ -755,6 +759,14 @@ def render_hitl_section(ticket_id: str, result: Dict[str, Any], is_interrupted: 
             </div>
         </div>
         """, unsafe_allow_html=True)
+
+        if gaps_hitl:
+            with st.expander(f"⚠️ O agente decidiu com {len(gaps_hitl)} lacuna(s) de dado — revise antes de aprovar",
+                             expanded=True):
+                for categoria, problemas in gaps_hitl.items():
+                    st.markdown(f"**{categoria}** — {'; '.join(problemas) if isinstance(problemas, list) else problemas}")
+        else:
+            st.success("Nenhuma lacuna registrada: o agente decidiu com evidência completa.", icon="✓")
 
         c1, c2, _ = st.columns([1.2, 1.2, 2.6])
         with c1:
