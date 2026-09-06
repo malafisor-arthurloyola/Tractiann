@@ -23,6 +23,9 @@ Thumbs.db
 
 # Agent
 agent/.env
+# Backups do .env carregam chaves de API — nunca versionar.
+agent/.env.bak*
+*.env.bak*
 
 # Generated eval outputs
 eval/results*.json

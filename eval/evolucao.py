@@ -11,9 +11,12 @@ Junta as duas fontes de verdade que o projeto já grava:
 Uso:
     python -m eval.evolucao            # tabela no terminal
     python -m eval.evolucao --md       # markdown, para colar na apresentação
+    python -m eval.evolucao --modelos  # desempenho por modelo que de fato respondeu
 """
 import argparse
+import json
 import sys
+from pathlib import Path
 
 from agent.logging.postgres import check_health, query
 
@@ -95,6 +98,55 @@ def render(markdown: bool = False) -> str:
     return "\n".join(out)
 
 
+def por_modelo(caminho: str = "eval/results-train.json") -> str:
+    """Desempenho agrupado pelo modelo que REALMENTE respondeu cada ticket.
+
+    Roteadores escolhem o modelo por requisição, então uma média sobre a rodada
+    inteira mistura modelos com vieses diferentes — um mais cauteloso, outro
+    mais afirmativo. Esta visão desfaz a mistura.
+    """
+    arquivo = Path(caminho)
+    if not arquivo.exists():
+        return f"{caminho} não existe. Rode `make run` primeiro."
+
+    resultados = json.loads(arquivo.read_text(encoding="utf-8"))["results"]
+    por: dict[str, dict] = {}
+    for r in resultados:
+        modelo = next(
+            (p.get("modelo") for p in (r.get("trace") or [])
+             if isinstance(p, dict) and p.get("node") == "decide" and p.get("modelo")),
+            "(não registrado)",
+        )
+        d = por.setdefault(modelo, {"n": 0, "acertos": 0, "notas": {}})
+        d["n"] += 1
+        if r.get("expected_decision") and r["expected_decision"] == r.get("decision"):
+            d["acertos"] += 1
+        juiz = r.get("judge") or {}
+        for eixo in EIXOS:
+            if isinstance(juiz.get(eixo), (int, float)):
+                d["notas"].setdefault(eixo, []).append(juiz[eixo])
+
+    if not por:
+        return "Nenhum resultado com modelo registrado."
+
+    cab = ["modelo", "tickets", "acuracia"] + list(EIXOS)
+    linhas = []
+    for modelo, d in sorted(por.items(), key=lambda kv: -kv[1]["n"]):
+        medias = [
+            f"{sum(v) / len(v):.2f}" if (v := d["notas"].get(e)) else "—"
+            for e in EIXOS
+        ]
+        linhas.append([modelo[:38], f"{d['n']}", f"{d['acertos']}/{d['n']}"] + medias)
+
+    larg = [max(len(c), *(len(l[i]) for l in linhas)) for i, c in enumerate(cab)]
+    out = ["  ".join(c.ljust(w) for c, w in zip(cab, larg)),
+           "  ".join("-" * w for w in larg)]
+    out += ["  ".join(c.ljust(w) for c, w in zip(l, larg)) for l in linhas]
+    out.append("")
+    out.append("Fonte: eval/results-train.json — o modelo vem do passo `decide` do trace.")
+    return "\n".join(out)
+
+
 def main() -> None:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -102,7 +154,13 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Evolução entre versões do agente")
     parser.add_argument("--md", action="store_true", help="Saída em markdown")
+    parser.add_argument("--modelos", action="store_true",
+                        help="Agrupa por modelo que de fato respondeu (roteadores variam)")
     args = parser.parse_args()
+
+    if args.modelos:
+        print(por_modelo())
+        return
 
     ok, motivo = check_health()
     if not ok:

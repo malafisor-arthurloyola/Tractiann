@@ -27,7 +27,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
-from ..llm import build_llm
+from ..llm import build_llm, modelo_efetivo
 from ..logging.phoenix import record_node
 from ..tools.mcp_client import call_tool
 from .state import AgentState
@@ -36,13 +36,14 @@ from .state import AgentState
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
-def _get_llm(structured_output=None):
+def _get_llm(structured_output=None, include_raw: bool = False):
     """LLM sob demanda (lazy), com fallback entre provedores.
 
     Ver `agent/llm.py`: se a cota do provedor principal acabar, a chamada cai
     automaticamente no próximo configurado.
     """
-    return build_llm(temperature=0.3, structured_output=structured_output)
+    return build_llm(temperature=0.3, structured_output=structured_output,
+                     include_raw=include_raw)
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +628,9 @@ def decide(state: AgentState) -> dict:
 
     cached = _cached_decision(context_text)
     if cached is not None:
-        record_node("decide.outcome", **{"cache.hit": True, "decision": cached.decision})
+        cached, modelo_cache = cached
+        record_node("decide.outcome", **{"cache.hit": True, "decision": cached.decision,
+                                         "llm.model_efetivo": modelo_cache})
         action_type, action_target = _validate_action(cached, state)
         return {
             "decision": cached.decision,
@@ -636,23 +639,31 @@ def decide(state: AgentState) -> dict:
             "action_type": action_type,
             "action_target": action_target,
             "trace": [{"node": "decide", "decision": cached.decision,
-                       "action": action_type, "from_cache": True}],
+                       "action": action_type, "from_cache": True,
+                       "modelo": modelo_cache}],
         }
 
-    llm = _get_llm(structured_output=AgentDecision)
-    result: AgentDecision = llm.invoke([
+    # include_raw devolve tambem a resposta bruta, de onde sai o modelo real.
+    llm = _get_llm(structured_output=AgentDecision, include_raw=True)
+    bruto = llm.invoke([
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=context_text),
     ])
+    result: AgentDecision = bruto["parsed"]
+    if result is None:
+        raise RuntimeError(f"LLM não produziu decisão válida: {bruto.get('parsing_error')}")
+    modelo = modelo_efetivo(bruto.get("raw"))
 
-    _write_decision_cache(context_text, result)
+    _write_decision_cache(context_text, result, modelo)
     action_type, action_target = _validate_action(result, state)
 
     record_node("decide.outcome", **{
         "cache.hit": False,
         "decision": result.decision,
         "action.type": action_type,
-        "llm.model": os.getenv("OPENAI_MODEL", ""),
+        # O slug pedido pode ser um combo; `llm.model_efetivo` e quem respondeu.
+        "llm.model_solicitado": os.getenv("OPENAI_MODEL", ""),
+        "llm.model_efetivo": modelo,
         "response.evidencias": result.evidencias,
         "response.limitacoes": result.limitacoes,
     })
@@ -664,7 +675,8 @@ def decide(state: AgentState) -> dict:
         "action_type": action_type,
         "action_target": action_target,
         "trace": [{"node": "decide", "decision": result.decision,
-                   "action": action_type, "from_cache": False}],
+                   "action": action_type, "from_cache": False,
+                   "modelo": modelo}],
     }
 
 
@@ -689,7 +701,8 @@ def _cache_key(context_text: str) -> str:
     return hashlib.sha1(f"{AGENT_VERSION}:{context_text}".encode("utf-8")).hexdigest()
 
 
-def _cached_decision(context_text: str) -> AgentDecision | None:
+def _cached_decision(context_text: str) -> tuple[AgentDecision, str | None] | None:
+    """Devolve (decisão, modelo que a gerou), ou None se não houver cache."""
     if not _cache_enabled():
         return None
     try:
@@ -697,19 +710,25 @@ def _cached_decision(context_text: str) -> AgentDecision | None:
         if not path.exists():
             return None
         import json
-        return AgentDecision(**json.loads(path.read_text(encoding="utf-8")))
+        dados = json.loads(path.read_text(encoding="utf-8"))
+        modelo = dados.pop("_modelo", None)
+        return AgentDecision(**dados), modelo
     except Exception:
         return None
 
 
-def _write_decision_cache(context_text: str, decision: AgentDecision) -> None:
+def _write_decision_cache(context_text: str, decision: AgentDecision,
+                          modelo: str | None = None) -> None:
     if not _cache_enabled():
         return
     try:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         import json
         path = _CACHE_DIR / f"{_cache_key(context_text)}.json"
-        path.write_text(json.dumps(decision.model_dump(), ensure_ascii=False), encoding="utf-8")
+        # `_modelo` fora do schema: preserva de qual modelo veio a decisão
+        # guardada, senão uma rodada com cache reportaria modelo desconhecido.
+        payload = {**decision.model_dump(), "_modelo": modelo}
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
