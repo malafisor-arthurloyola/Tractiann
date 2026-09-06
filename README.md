@@ -11,7 +11,7 @@ O briefing original do parceiro está em [`STUDENT-GUIDE.md`](./STUDENT-GUIDE.md
 
 ## Resultado
 
-| conjunto | origem | acertos | erros conservadores | erros arriscados |
+| conjunto | origem dos tickets | acertos | erros conservadores | erros arriscados |
 | :--- | :--- | ---: | ---: | ---: |
 | treino | parceiro | 9/13 — 69% | 4 | **0** |
 | teste *held-out* | parceiro | 3/4 — 75% | 1 | **0** |
@@ -24,8 +24,9 @@ respaldo.
 A acurácia no treino, replicada três vezes, é **9,3 ± 0,5 de 13**. A oscilação está
 concentrada num único ticket de fronteira: 12 dos 13 dão a mesma decisão em todas as rodadas.
 
-A linha de base, medida antes de qualquer mudança, era **4 de 13 — 31%**, com dez dos treze
-tickets sendo escalados. A trajetória completa das sete versões está em
+A **primeira versão que eu construí**, medida antes de qualquer auditoria, fazia **4 de 13
+— 31%**, com dez dos treze tickets sendo escalados. O parceiro forneceu a API, os tickets e o
+gabarito; a camada de agente — MCP, LangGraph, avaliação, observabilidade — é autoria própria. A trajetória completa das sete versões está em
 [`docs/EVOLUCAO.md`](./docs/EVOLUCAO.md).
 
 ### Por que a versão entregue não é a de maior acurácia
@@ -199,6 +200,7 @@ make test                                        # 39 testes da API industrial
 | Decisão sobre a camada MCP, com histórico | [`docs/adr/`](./docs/adr/) |
 | Glossário do domínio | [`CONTEXT.md`](./CONTEXT.md) |
 | Guia de comandos | [`COMMANDS.md`](./COMMANDS.md) · [`QUICKSTART.md`](./QUICKSTART.md) |
+| Onde cada processo mora no código | [`docs/MAPA-DO-CODIGO.md`](./docs/MAPA-DO-CODIGO.md) |
 | Notas de estudo e decisões | [`Extra/Obsidian/Tractian Project/`](./Extra/Obsidian/) |
 
 ---

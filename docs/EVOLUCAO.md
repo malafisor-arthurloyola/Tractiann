@@ -14,7 +14,7 @@ no split de treino (13 tickets) antes e depois de cada mudança, com o gabarito
 
 | versão | acurácia de decisão | o que mudou |
 | :--- | ---: | :--- |
-| **v1** | **4/13 — 31%** | linha de base (estado herdado) |
+| **v1** | **4/13 — 31%** | minha primeira versão do agente |
 | v2 | 6/13 — 46% | evidência degradada deixa de bloquear |
 | **v3** | **11/13 — 85%** | triagem pela intenção do cliente |
 | v4 | 10/13 — 77% | correções no juiz e no idioma |
@@ -27,9 +27,13 @@ v5 é ruído de temperatura (`temperature=0.3`), não sinal.
 
 ---
 
-## v1 — Linha de base
+## v1 — Minha primeira versão
 
-Estado do agente no início da auditoria.
+O parceiro forneceu a API industrial, os tickets e o gabarito — mais orientação de
+base sobre MCP e agentes. **Todo o agente é autoria própria**: a modelagem do MCP, o
+grafo LangGraph, o harness de avaliação, a observabilidade e a interface.
+
+Esta é a primeira versão que eu construí, medida antes de qualquer auditoria.
 
 ```
 acurácia de decisão   4/13 = 31%
@@ -275,7 +279,7 @@ para medir:
 
 ### Acurácia por conjunto (agente v7 · omniroute → claude-sonnet-4.5)
 
-| conjunto | origem | acertos | conservadores | arriscados |
+| conjunto | origem dos tickets | acertos | conservadores | arriscados |
 | :--- | :--- | ---: | ---: | ---: |
 | treino | parceiro | 9/13 — 69% | 4 | **0** |
 | teste held-out | parceiro | 3/4 — 75% | 1 | **0** |
