@@ -440,13 +440,18 @@ def execute_agent_stepwise(case: Dict[str, Any]) -> Tuple[Dict[str, Any], float,
 
     pausado = "__interrupt__" in result
     try:
+        # A mesma classificação que a ingestão aplica. Sem ela, rodar um ticket
+        # aqui gravava `split='avulso'` e sem gabarito, sobrescrevendo a linha da
+        # ingestão — cada execução manual apagava um ticket das métricas.
+        from agent.ingest import classificar
+        split, esperada, nota = classificar(case, result)
         # Registra também na pausa: um ticket abandonado no interrupt (o operador
         # nunca confirma nem cancela) sumia do histórico, porque só o caminho
         # completo e o resume gravavam.
         registrar_ticket(
             result, agent_version=AGENT_VERSION, thread_id=thread_id,
             status="aguardando_humano" if pausado else "concluido",
-            split="avulso",
+            split=split, decisao_esperada=esperada, trajectory_score=nota,
         )
     except Exception:
         pass
@@ -478,9 +483,16 @@ def resume_agent_action(ticket_id: str, confirm: bool,
     with run_in_phoenix_trace(thread_id, ticket_id):
         resumed = agent_graph.invoke(Command(resume=confirm), config=config)
     try:
+        # Retomar não é um ticket novo: é a continuação de um que já foi
+        # classificado. Herdar conjunto e gabarito da linha anterior evita que
+        # aprovar uma ação tire o ticket do conjunto a que ele pertence.
+        anterior = carregar_ticket(ticket_id, AGENT_VERSION) or {}
         registrar_ticket(
             resumed, agent_version=AGENT_VERSION, thread_id=thread_id,
-            status="concluido" if confirm else "cancelado", split="avulso",
+            status="concluido" if confirm else "cancelado",
+            split=anterior.get("split"),
+            decisao_esperada=anterior.get("decisao_esperada"),
+            trajectory_score=anterior.get("trajectory_score"),
         )
         resolver_pendencia(thread_id, aprovado=confirm, por="operador")
     except Exception:

@@ -152,7 +152,30 @@ def limpar(agent_version: str) -> int:
     return apagados
 
 
-def processar(case: dict, *, run_id: str, gabarito: dict | None = None) -> dict:
+def classificar(case: dict, resultado: dict) -> tuple:
+    """(split, decisão esperada, nota de trajetória) de um ticket já executado.
+
+    Fica aqui, e não embutida em `processar`, porque a interface Streamlit
+    também executa tickets — e precisa gravar exatamente a mesma classificação.
+    Sem isso, rodar um ticket à mão sobrescrevia a linha da ingestão com
+    `split='avulso'` e sem gabarito, degradando as métricas da plataforma a cada
+    execução manual.
+    """
+    split = _split_de(case)
+    gabarito = _carregar_gabaritos().get(case.get("ticket_id"))
+    if not gabarito:
+        return split, None, None
+
+    from eval.assertions.trajectory import assert_trajectory, expected_decision
+    esperada = expected_decision(gabarito)
+    try:
+        nota = assert_trajectory(resultado, gabarito).get("score")
+    except Exception:
+        nota = None
+    return split, esperada, nota
+
+
+def processar(case: dict, *, run_id: str) -> dict:
     """Processa um ticket como a plataforma faria: sem aprovar nada sozinha.
 
     Devolve um resumo do que aconteceu — se congelou esperando humano, qual ação
@@ -173,21 +196,14 @@ def processar(case: dict, *, run_id: str, gabarito: dict | None = None) -> dict:
     payload = resultado["__interrupt__"][0].value if pausado else {}
 
     # Avaliação, quando há gabarito. Não altera o que o agente fez — só anota.
-    nota, esperada = None, None
-    if gabarito:
-        from eval.assertions.trajectory import assert_trajectory, expected_decision
-        esperada = expected_decision(gabarito)
-        try:
-            nota = assert_trajectory(resultado, gabarito).get("score")
-        except Exception as e:
-            print(f"  [aviso] avaliacao falhou para {ticket_id}: {e}")
+    split, esperada, nota = classificar(case, resultado)
 
     registrar_ticket(
         resultado,
         agent_version=AGENT_VERSION,
         thread_id=thread_id,
         status="aguardando_humano" if pausado else "concluido",
-        split=_split_de(case),
+        split=split,
         decisao_esperada=esperada,
         trajectory_score=nota,
     )
@@ -264,7 +280,6 @@ def main() -> int:
         print("Nenhum ticket a processar.")
         return 1
 
-    gabaritos = _carregar_gabaritos()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
     substituidas = substituir_pendencias([c["ticket_id"] for c in casos], AGENT_VERSION)
@@ -279,7 +294,7 @@ def main() -> int:
         tid = caso["ticket_id"]
         print(f"[{i}/{len(casos)}] {tid} ...", end=" ", flush=True)
         try:
-            r = processar(caso, run_id=run_id, gabarito=gabaritos.get(tid))
+            r = processar(caso, run_id=run_id)
         except Exception as e:
             falhas += 1
             print(f"FALHOU: {type(e).__name__}: {str(e)[:120]}")
