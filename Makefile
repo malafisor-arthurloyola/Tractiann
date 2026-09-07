@@ -99,6 +99,12 @@ ingest: ## Processa todos os tickets na plataforma (fila de aprovacoes no Postgr
 ingest-derivados: ## Ingestao incluindo os 6 cenarios derivados (23 tickets)
 	$(PY) -m agent.ingest --derivados
 
+reset-demo: ## Zera a plataforma e reingere tudo (use entre o ensaio e a gravacao)
+	$(PY) -m agent.ingest --limpar
+
+fila: ## Mostra a fila de aprovacoes pendentes, sem abrir a interface
+	$(PY) -m agent.ingest --listar
+
 up-agent: ## Sobe a interface Streamlit (:8501)
 	$(PY) -m streamlit run app.py
 

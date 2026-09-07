@@ -296,6 +296,31 @@ Sem Postgres, o sistema cai para `MemorySaver` e avisa na aba — a fila fica va
 não há onde compartilhar o estado. `CHECKPOINTER=memory` força esse modo (é o que a suíte
 de testes usa, para não depender de um container).
 
+### Ensaiar e depois gravar
+
+Aprovar um item **consome** a pendência: ela vira histórico e não volta. Isso é o
+comportamento correto de uma fila de aprovações, mas atrapalha quem quer ensaiar antes de
+gravar. `make reset-demo` devolve a plataforma ao estado de recém-ingerida.
+
+```bash
+make reset-demo
+```
+
+Ele apaga os tickets, a fila **e os checkpoints do grafo** antes de reingerir. Apagar só as
+linhas deixaria checkpoints órfãos: o estado congelado de execuções que ninguém mais
+alcança, porque o `thread_id` que apontava para elas sumiu.
+
+Para inspecionar a fila sem abrir a interface:
+
+```bash
+make fila
+```
+
+Nada expira sozinho. Uma pendência fica `pendente` indefinidamente até alguém decidir, e
+depois de decidida fica no histórico para sempre. Os dados vivem no volume Docker
+`postgres_data`, que sobrevive a `docker compose stop` e a `docker compose down` — só
+`docker compose down -v` os apaga.
+
 ### O que fica pronto depois do `make demo`
 
 | aba | disponível? |

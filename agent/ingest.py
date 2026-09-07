@@ -42,6 +42,8 @@ from agent.logging.postgres import (
     registrar_ticket,
     enfileirar_aprovacao,
     substituir_pendencias,
+    limpar_plataforma,
+    query,
 )
 from agent.version import AGENT_VERSION
 
@@ -121,6 +123,35 @@ def _split_de(case: dict) -> str:
     return "avulso"
 
 
+def limpar(agent_version: str) -> int:
+    """Zera o estado da plataforma: tickets, fila e checkpoints do grafo.
+
+    Apagar só as linhas de `execucoes` e `fila_aprovacoes` deixaria os
+    checkpoints órfãos no banco — o estado congelado de execuções que ninguém
+    mais consegue alcançar, porque o `thread_id` que apontava para elas sumiu.
+    Por isso o `delete_thread` de cada uma antes.
+
+    Serve ao ensaio antes de uma gravação: aprovar itens na fila os consome, e
+    esta função devolve a plataforma ao estado de "recém-ingerida".
+    """
+    from agent.graph.agent import agent_graph
+
+    linhas = query(
+        """SELECT DISTINCT thread_id FROM execucoes
+            WHERE agent_version = %s AND thread_id IS NOT NULL""",
+        (agent_version,),
+    ) or []
+    apagados = 0
+    for linha in linhas:
+        try:
+            agent_graph.checkpointer.delete_thread(linha["thread_id"])
+            apagados += 1
+        except Exception:
+            pass
+    limpar_plataforma(agent_version)
+    return apagados
+
+
 def processar(case: dict, *, run_id: str, gabarito: dict | None = None) -> dict:
     """Processa um ticket como a plataforma faria: sem aprovar nada sozinha.
 
@@ -188,11 +219,25 @@ def main() -> int:
                    help="inclui tambem os 6 cenarios derivados")
     p.add_argument("--tickets", nargs="*", default=None,
                    help="processa apenas estes ticket_ids")
+    p.add_argument("--limpar", action="store_true",
+                   help="apaga tickets, fila e checkpoints da versao antes de ingerir")
+    p.add_argument("--listar", action="store_true",
+                   help="so mostra a fila de aprovacoes pendentes e sai")
     args = p.parse_args()
 
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+
+    if args.listar:
+        # Consulta pura: nao sobe tracing nem toca no grafo.
+        from agent.logging.postgres import listar_pendencias
+        pendentes = listar_pendencias(AGENT_VERSION)
+        print(f"{len(pendentes)} pendencia(s) na fila de aprovacoes:")
+        for p_ in pendentes:
+            print(f"   {p_['ticket_id']:12} {p_['action_type']} -> {p_['action_target']}"
+                  f"   (thread {p_['thread_id']})")
+        return 0
 
     setup_phoenix_tracing()
     if not init_db():
@@ -206,6 +251,10 @@ def main() -> int:
         print("Sem checkpointer persistente as acoes pausadas morrem com este "
               "processo, e a interface nao as enxerga.")
         return 1
+
+    if args.limpar:
+        apagados = limpar(AGENT_VERSION)
+        print(f"Plataforma zerada: {apagados} checkpoint(s), tickets e fila apagados.\n")
 
     casos = _carregar_casos(args.derivados)
     if args.tickets:
