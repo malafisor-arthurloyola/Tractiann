@@ -329,5 +329,10 @@ depois de decidida fica no histórico para sempre. Os dados vivem no volume Dock
 | Notificações → autonomia e acerto | sim — lidos das tabelas do Postgres |
 | Métricas & Avaliação | sim — lê de `eval/results-*.json` |
 | Phoenix (`:6006`) | sim — um trace por ticket ingerido |
-| Diagnóstico & HITL | precisa abrir um ticket na barra lateral |
-| Trace & Sinais | precisa executar um ticket na sessão |
+| Diagnóstico & HITL | sim — o diagnóstico é carregado do banco ao abrir o ticket |
+| Trace & Sinais | sim — o trace vem da mesma linha |
+
+Um ticket já processado abre com o diagnóstico completo e uma legenda dizendo de quando é.
+`▶ Executar Agente` continua ali para rodar de novo, mas não é mais necessário só para ver
+o resultado. Na caixa de entrada, **Abrir ticket ↗** leva direto ao diagnóstico do chamado
+pendente.

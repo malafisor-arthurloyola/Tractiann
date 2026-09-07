@@ -314,9 +314,16 @@ def enfileirar_aprovacao(*, ticket_id: str, thread_id: str, agent_version: str,
     entram porque são justamente o que um humano precisa ver antes de autorizar
     uma escrita na plataforma.
 
-    O `ON CONFLICT (thread_id)` torna a ingestão repetível: rodar duas vezes não
-    duplica pendências.
+    O `ON CONFLICT (thread_id)` torna a ingestão repetível: rodar duas vezes na
+    mesma thread não duplica pendências. Reexecutar o ticket, porém, cria uma
+    thread nova — e sem a chamada a `substituir_pendencias` abaixo o operador
+    veria o mesmo ticket duas vezes na caixa de entrada, apontando para
+    checkpoints diferentes; aprovar um deixaria o outro pendurado. **Um ticket
+    tem no máximo uma aprovação em aberto** é invariante da fila, então é
+    garantido aqui e não em cada chamador.
     """
+    substituir_pendencias([ticket_id], agent_version)
+
     conn = _get_connection()
     if not conn:
         return False
@@ -471,3 +478,41 @@ def substituir_pendencias(ticket_ids: list, agent_version: str) -> int:
         (agent_version, list(ticket_ids)),
     )
     return (r or {}).get("affected", 0)
+
+
+def carregar_ticket(ticket_id: str, agent_version: str) -> dict | None:
+    """Última execução de um ticket feita pela plataforma, ou None.
+
+    É o que permite a interface mostrar um ticket já processado sem reexecutá-lo:
+    a ingestão roda uma vez, e qualquer navegador que abrir depois lê daqui.
+    Sem isso, o resultado só existia em `st.session_state` — ou seja, só para
+    quem tivesse clicado em "Executar Agente" naquela aba do navegador.
+    """
+    linhas = query(
+        """SELECT ticket_id, asset_id, user_id, decision, quality_verdict,
+                  data_gaps, trace, response, status, thread_id, split,
+                  decisao_esperada, trajectory_score, created_at
+             FROM execucoes
+            WHERE agent_version = %s AND ticket_id = %s AND thread_id IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 1""",
+        (agent_version, ticket_id),
+    )
+    return linhas[0] if linhas else None
+
+
+def pendencia_de(ticket_id: str, agent_version: str) -> dict | None:
+    """Pendência aberta de um ticket, se houver.
+
+    Carrega o que o `interrupt()` guardou — ação, alvo, justificativa e lacunas —
+    para a interface montar o painel de confirmação a partir do banco, e não de
+    um objeto `Interrupt` que só existe na memória de quem executou.
+    """
+    linhas = query(
+        """SELECT * FROM fila_aprovacoes
+            WHERE agent_version = %s AND ticket_id = %s AND status = 'pendente'
+            ORDER BY criado_em DESC
+            LIMIT 1""",
+        (agent_version, ticket_id),
+    )
+    return linhas[0] if linhas else None

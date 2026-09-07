@@ -46,6 +46,8 @@ from agent.logging.postgres import (
     historico_aprovacoes,
     estatisticas_autonomia,
     listar_tickets,
+    carregar_ticket,
+    pendencia_de,
 )
 from agent.graph.checkpointer import status as checkpointer_status
 from agent.logging.phoenix import setup_phoenix_tracing, run_in_phoenix_trace
@@ -394,6 +396,22 @@ def format_case_option(case: Dict[str, Any]) -> str:
     return f"{emoji} {case['ticket_id']} — {preview}"
 
 
+# Rótulos das abas. Ficam em constantes porque a navegação programática (abrir um
+# ticket a partir de uma notificação) escreve o rótulo em `st.session_state`, e um
+# rótulo escrito à mão em dois lugares diverge no primeiro ajuste de texto.
+# O valor guardado e um id estavel, nao o rotulo: o rotulo das notificacoes
+# carrega o contador de pendencias, e se ele fosse a identidade da secao,
+# aprovar um item mudaria o rotulo e a navegacao perderia a posicao — o operador
+# seria jogado para fora da fila exatamente ao trabalhar nela.
+ABA_KEY = "aba_ativa"
+ABA_DIAGNOSTICO = "diagnostico"
+ABA_NOTIFICACOES = "notificacoes"
+ABA_TRACE = "trace"
+ABA_METRICAS = "metricas"
+ABA_PLAYGROUND = "playground"
+ABAS = [ABA_DIAGNOSTICO, ABA_NOTIFICACOES, ABA_TRACE, ABA_METRICAS, ABA_PLAYGROUND]
+
+
 # ── Execução do Grafo com HITL Interativo ───────────────────────────────────
 def execute_agent_stepwise(case: Dict[str, Any]) -> Tuple[Dict[str, Any], float, bool]:
     """Executa o grafo de um ticket, parando no `interrupt()` se houver.
@@ -468,6 +486,115 @@ def resume_agent_action(ticket_id: str, confirm: bool,
     except Exception:
         pass
     return resumed
+
+
+def _acao_no_trace(trace: list) -> tuple:
+    """(action_type, action_target) registrados pelo nó `act`, se ele rodou."""
+    passo = next((t for t in (trace or []) if t.get("node") == "act"), None)
+    if not passo:
+        return None, None
+    return passo.get("action_type"), passo.get("action_target")
+
+
+def estado_do_banco(ticket_id: str) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """Reconstrói o resultado de um ticket a partir do Postgres.
+
+    A ingestão (`make demo`) processa cada ticket uma vez e grava tudo — trace,
+    decisão, resposta, lacunas. Sem esta função, abrir a plataforma depois disso
+    mostrava um ticket em branco pedindo "Executar Agente", porque as abas liam
+    apenas `st.session_state`, que é vazio num navegador recém-aberto. O trabalho
+    já estava feito; a interface é que não sabia procurá-lo.
+
+    Devolve (estado, pausado) no mesmo formato que `execute_agent_stepwise`, de
+    modo que os renderizadores não precisam saber de onde o dado veio.
+    """
+    try:
+        linha = carregar_ticket(ticket_id, AGENT_VERSION)
+    except Exception:
+        return None, False
+    if not linha:
+        return None, False
+
+    estado: Dict[str, Any] = {
+        "ticket_id": linha["ticket_id"],
+        "asset_id": linha.get("asset_id"),
+        "user_id": linha.get("user_id"),
+        "decision": linha.get("decision"),
+        "quality_verdict": linha.get("quality_verdict"),
+        "data_gaps": linha.get("data_gaps") or {},
+        "trace": linha.get("trace") or [],
+        "response": linha.get("response"),
+        # Marca a procedência: a aba avisa que isto veio do último
+        # processamento, não de uma execução desta sessão.
+        "_processado_em": linha.get("created_at"),
+    }
+    estado["action_type"], estado["action_target"] = _acao_no_trace(estado["trace"])
+
+    pausado = linha.get("status") == "aguardando_humano"
+    if pausado:
+        pend = pendencia_de(ticket_id, AGENT_VERSION)
+        if pend:
+            # O painel de HITL lê estes campos quando não há um objeto
+            # `Interrupt` em mãos — e não há, porque quem pausou foi outro
+            # processo. Os dados são os mesmos: o `interrupt()` gravou-os na fila.
+            estado["action_type"] = pend.get("action_type")
+            estado["action_target"] = pend.get("action_target")
+            estado["decision_justification"] = pend.get("justification")
+            estado["data_gaps"] = pend.get("gaps") or estado["data_gaps"]
+        else:
+            # A linha diz "aguardando" mas a fila não tem pendência aberta: ela
+            # foi decidida ou substituída por uma reingestão. Tratar como pausado
+            # ofereceria ao operador botões que retomariam um checkpoint morto.
+            pausado = False
+
+    # O `thread_id` do banco é a chave para retomar ESTA execução. Sem gravá-lo,
+    # o botão de confirmar cairia no id da sessão e tentaria retomar outra coisa.
+    if linha.get("thread_id"):
+        st.session_state[f"thread_{ticket_id}"] = linha["thread_id"]
+
+    return estado, pausado
+
+
+PEDIDO_NAVEGACAO = "_navegar_para_ticket"
+
+
+def abrir_ticket(ticket_id: str, cases: List[Dict[str, Any]]) -> bool:
+    """Registra o pedido de abrir o diagnóstico de um ticket.
+
+    Não escreve nas chaves dos widgets aqui: o Streamlit recusa modificar a
+    chave de um widget depois que ele foi instanciado, e este botão vive dentro
+    das abas — ou seja, depois da barra lateral e das próprias abas. Escrever
+    direto levanta `StreamlitWidgetAlreadyInstantiatedError`.
+
+    O pedido fica numa chave comum e é aplicado por `aplicar_navegacao()` no
+    início do próximo ciclo, antes de qualquer widget existir.
+
+    Devolve False quando o ticket não está entre os casos da barra lateral (é o
+    caso dos cenários derivados, que não fazem parte dos 17 chamados oficiais).
+    """
+    if not any(c["ticket_id"] == ticket_id for c in cases):
+        return False
+    st.session_state[PEDIDO_NAVEGACAO] = ticket_id
+    return True
+
+
+def aplicar_navegacao(cases: List[Dict[str, Any]]):
+    """Consome um pedido de `abrir_ticket`, posicionando barra lateral e aba.
+
+    Precisa rodar antes de `render_sidebar` e de `st.tabs`: é a janela em que as
+    chaves desses widgets ainda podem ser escritas. O filtro de modalidade volta
+    a "Todos" porque o ticket pedido pode não estar na modalidade filtrada — sem
+    isso, a seleção apontaria para uma opção fora da lista.
+    """
+    ticket_id = st.session_state.pop(PEDIDO_NAVEGACAO, None)
+    if not ticket_id:
+        return
+    caso = next((c for c in cases if c["ticket_id"] == ticket_id), None)
+    if not caso:
+        return
+    st.session_state["sidebar_filter_modality"] = "Todos"
+    st.session_state["selected_ticket_label"] = format_case_option(caso)
+    st.session_state[ABA_KEY] = ABA_DIAGNOSTICO
 
 
 # ── Componentes de UI: Header ────────────────────────────────────────────────
@@ -726,7 +853,18 @@ def render_result_cards(result: Dict[str, Any], elapsed: Optional[float] = None)
     verdict = result.get("quality_verdict")
     decision = result.get("decision")
     gaps = result.get("data_gaps") or result.get("gaps") or {}
+    # `raw` (os envelopes brutos) só existe numa execução desta sessão — não é
+    # persistido, porque guardar o payload inteiro de cada ticket incharia o
+    # banco. Para um diagnóstico carregado do Postgres, o número de chamadas sai
+    # do trace, que registra `tools_called` a cada rodada de investigação.
     raw_keys = list(result.get("raw", {}).keys())
+    if not raw_keys:
+        raw_keys = [
+            tool
+            for passo in (result.get("trace") or [])
+            if passo.get("node") == "investigate"
+            for tool in (passo.get("tools_called") or [])
+        ]
 
     gap_text = ", ".join(gaps.keys()) if isinstance(gaps, dict) and gaps else "Nenhuma"
     if isinstance(gaps, list):
@@ -944,13 +1082,31 @@ def tab_diagnostico(case: Dict[str, Any], result: Optional[Dict[str, Any]], elap
     render_ticket_card(case)
 
     if result:
+        # Procedência: sem isto, um diagnóstico vindo da ingestão é
+        # indistinguível de um que acabou de rodar, e o operador não tem como
+        # saber se está olhando dado de agora ou da semana passada.
+        processado_em = result.get("_processado_em")
+        if processado_em:
+            # O Postgres devolve em UTC. Mostrar o horário cru faria o operador
+            # ler três horas a menos do que o relógio dele — uma leitura errada
+            # que parece um sistema desatualizado.
+            local = processado_em.astimezone() if processado_em.tzinfo else processado_em
+            st.caption(
+                f"Diagnóstico do processamento de "
+                f"**{local.strftime('%d/%m às %H:%M')}**, carregado do banco. "
+                "Use **▶ Executar Agente** para rodar de novo."
+            )
         # Se escalou para humano, renderiza o Chamado de Suporte Handoff com prioridade máxima
         render_handoff_support_ticket(case, result)
         render_result_cards(result, elapsed)
         render_hitl_section(case["ticket_id"], result, is_interrupted)
         render_response(result, case)
     else:
-        st.info("👈 Selecione um ticket na barra lateral e clique em **▶ Executar Agente** para ver o diagnóstico completo.")
+        st.info(
+            "Este ticket ainda não foi processado. Clique em **▶ Executar Agente** na "
+            "barra lateral, ou rode `make ingest` para processar todos de uma vez.",
+            icon="💡",
+        )
 
 
 # ── Componentes de UI: Aba Trace & Grafo Visual Conectado ────────────────────
@@ -1425,7 +1581,7 @@ def _tempo_de_espera(criado_em) -> str:
     return f"{segundos // 86400}d"
 
 
-def _render_pendencia(p: dict, indice: int):
+def _render_pendencia(p: dict, indice: int, cases: List[Dict[str, Any]]):
     """Um item da caixa de entrada, com o contexto necessário para decidir.
 
     O operador precisa de três coisas antes de autorizar uma escrita: o que o
@@ -1469,8 +1625,22 @@ def _render_pendencia(p: dict, indice: int):
         st.caption(f"`thread_id` = `{p['thread_id']}` — a chave do checkpoint que "
                    "será retomado.")
 
-        col_ok, col_no, _ = st.columns([1, 1, 2])
+        col_ok, col_no, col_abrir = st.columns([1, 1, 1.4])
         chave = p["thread_id"]
+        # Abrir o ticket leva ao diagnóstico completo: trace, sinais e o dossiê.
+        # A fila mostra o suficiente para decidir o caso simples; o caso duvidoso
+        # exige ver a investigação inteira, e obrigar o operador a procurar o
+        # ticket na barra lateral é atrito sem propósito.
+        if col_abrir.button("Abrir ticket ↗", key=f"abrir_{chave}"):
+            if abrir_ticket(p["ticket_id"], cases):
+                st.rerun()
+            else:
+                st.info(
+                    f"`{p['ticket_id']}` é um cenário derivado e não está entre os "
+                    "17 chamados oficiais da barra lateral. Ele pode ser aprovado "
+                    "aqui, mas não tem página de diagnóstico.",
+                    icon="ℹ️",
+                )
         if col_ok.button("Aprovar e executar", type="primary", key=f"ok_{chave}"):
             with st.spinner("Executando a ação na plataforma..."):
                 try:
@@ -1551,7 +1721,7 @@ def tab_notificacoes(cases: List[Dict[str, Any]]):
             icon="🔔",
         )
         for i, p in enumerate(pendentes):
-            _render_pendencia(p, i)
+            _render_pendencia(p, i, cases)
     else:
         st.success("Nenhuma ação pendente.", icon="✓")
         stats = estatisticas_autonomia(AGENT_VERSION)
@@ -1628,7 +1798,9 @@ def tab_notificacoes(cases: List[Dict[str, Any]]):
                 "Alvo": h.get("action_target") or "—",
                 "Decisão": h["status"],
                 "Por": h.get("resolvido_por") or "—",
-                "Quando": h["resolvido_em"].strftime("%d/%m %H:%M") if h.get("resolvido_em") else "—",
+                # `.astimezone()` sem argumento converte para o fuso local; o
+                # Postgres guarda em UTC.
+                "Quando": h["resolvido_em"].astimezone().strftime("%d/%m %H:%M") if h.get("resolvido_em") else "—",
             } for h in historico]),
             width="stretch", hide_index=True,
         )
@@ -1704,6 +1876,10 @@ def main():
         st.error("Não foi possível carregar os casos de teste em `agent-input/cases.json`.")
         st.stop()
 
+    # Antes de qualquer widget: é a única janela em que as chaves da barra
+    # lateral e das abas ainda podem ser escritas (ver `abrir_ticket`).
+    aplicar_navegacao(cases)
+
     selected_case, filter_mod = render_sidebar(cases)
 
     # Identificadores de estado da sessão
@@ -1747,39 +1923,56 @@ def main():
             except Exception as e:
                 st.error(f"❌ Erro: {e}")
 
-    # Recupera estado do ticket selecionado
+    # Recupera estado do ticket selecionado. Se esta sessão não executou o
+    # ticket, busca no Postgres o que a ingestão já processou — é o que faz a
+    # plataforma abrir com os tickets prontos em vez de pedir "Executar Agente".
     result = st.session_state.get(result_key)
     elapsed = st.session_state.get(elapsed_key)
     is_interrupted = st.session_state.get(interrupted_key, False)
+    if result is None:
+        result, is_interrupted = estado_do_banco(ticket_id)
 
-    # Abas da Aplicação. O contador sai do Postgres, então marca também o que
-    # foi congelado por outro processo — a ingestão do `make demo`, por exemplo.
+    # Navegação. O contador de pendências sai do Postgres, então marca também o
+    # que foi congelado por outro processo — a ingestão do `make demo`.
     try:
         pendentes_n = len(listar_pendencias(AGENT_VERSION))
     except Exception:
         pendentes_n = 0
-    rotulo_notif = f"🔔 Notificações ({pendentes_n})" if pendentes_n else "🔔 Notificações"
-    tab_diag, tab_notif, tab_tr, tab_met, tab_play = st.tabs([
-        "📋 Diagnóstico & HITL",
-        rotulo_notif,
-        "🔍 Trace & Sinais Técnicos",
-        "📈 Métricas & Avaliação",
-        "🧪 Playground",
-    ])
 
-    with tab_diag:
+    def _rotulo(aba: str) -> str:
+        return {
+            ABA_DIAGNOSTICO: "📋 Diagnóstico & HITL",
+            ABA_NOTIFICACOES: (f"🔔 Notificações ({pendentes_n})" if pendentes_n
+                               else "🔔 Notificações"),
+            ABA_TRACE: "🔍 Trace & Sinais Técnicos",
+            ABA_METRICAS: "📈 Métricas & Avaliação",
+            ABA_PLAYGROUND: "🧪 Playground",
+        }[aba]
+
+    # `st.segmented_control` no lugar de `st.tabs` porque as abas nao aceitam
+    # selecao programatica: escrever no `session_state` de um `st.tabs` com
+    # `key` faz o widget sumir da tela e o valor voltar `None` (testado no
+    # Streamlit 1.63). Sem isso, clicar numa notificacao nao consegue levar o
+    # operador ao ticket. De quebra, so a secao ativa e renderizada — as abas
+    # executavam o conteudo das cinco a cada interacao.
+    if st.session_state.get(ABA_KEY) not in ABAS:
+        st.session_state[ABA_KEY] = ABA_DIAGNOSTICO
+    aba = st.segmented_control(
+        "Navegação", ABAS, key=ABA_KEY, format_func=_rotulo,
+        label_visibility="collapsed",
+    ) or ABA_DIAGNOSTICO
+    st.markdown("<hr style='margin:4px 0 14px 0; border:none; "
+                "border-top:1px solid #1e2530;'>", unsafe_allow_html=True)
+
+    if aba == ABA_DIAGNOSTICO:
         tab_diagnostico(selected_case, result, elapsed, is_interrupted)
-
-    with tab_notif:
+    elif aba == ABA_NOTIFICACOES:
         tab_notificacoes(cases)
-
-    with tab_tr:
+    elif aba == ABA_TRACE:
         tab_trace(result)
-
-    with tab_met:
+    elif aba == ABA_METRICAS:
         tab_metricas()
-
-    with tab_play:
+    elif aba == ABA_PLAYGROUND:
         tab_playground(cases)
 
 
