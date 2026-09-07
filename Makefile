@@ -30,7 +30,7 @@ PY_ABS := $(CURDIR)/.venv/Scripts/python.exe
 
 .DEFAULT_GOAL := help
 
-.PHONY: all help setup deps data agent-env up up-api up-agent up-all stop logs test clean clean-data postgres-up postgres-down postgres-init eval run phoenix-up phoenix-down up-obs compare compare-versions prova-final evolucao evolucao-md derivados demo
+.PHONY: all help setup deps data agent-env up up-api ui up-agent up-all stop logs test clean clean-data postgres-up postgres-down postgres-init eval run phoenix-up phoenix-down up-obs compare compare-versions prova-final evolucao evolucao-md derivados demo ingest ingest-derivados reset-demo fila
 
 all: up-all ## Alias para up-all (sobe API + Streamlit)
 
@@ -46,7 +46,11 @@ help: ## Mostra esta ajuda
 	@echo   phoenix-up   - Sobe o Phoenix (tracing open source) :6006
 	@echo   phoenix-down - Para o Phoenix
 	@echo   up-obs       - Sobe Postgres + Phoenix juntos (observabilidade)
-	@echo   demo         - Prepara tudo e abre a plataforma pronta para demonstrar
+	@echo   ui           - Sobe a interface Streamlit em :8501
+	@echo   demo         - Sobe tudo, ingere os tickets e abre a plataforma
+	@echo   ingest       - Processa os tickets (congela o que exige aprovacao)
+	@echo   reset-demo   - Zera a plataforma e reingere (ensaio antes de gravar)
+	@echo   fila         - Lista as aprovacoes pendentes, sem abrir a interface
 	@echo   eval         - Roda avaliação no TREINO (sem juiz LLM) — dev
 	@echo   run          - Roda avaliação no treino (com juiz LLM)
 	@echo   prova-final  - Roda o TESTE held-out (generalização, com juiz)
@@ -105,8 +109,11 @@ reset-demo: ## Zera a plataforma e reingere tudo (use entre o ensaio e a gravaca
 fila: ## Mostra a fila de aprovacoes pendentes, sem abrir a interface
 	$(PY) -m agent.ingest --listar
 
-up-agent: ## Sobe a interface Streamlit (:8501)
+ui: ## Sobe a interface Streamlit (:8501)
 	$(PY) -m streamlit run app.py
+
+# `up-agent` e o nome antigo; a documentacao toda usa `make ui`.
+up-agent: ui
 
 up-all: up-api ## Sobe a API e inicia o Streamlit
 	@echo ""
