@@ -37,6 +37,25 @@ investigar ou segue para decidir; `route_after_decide` escolhe entre orientar, a
 
 **Mexa aqui quando:** quiser mudar o *fluxo* — adicionar um nó, mudar quando o grafo faz laço.
 
+### `agent/graph/checkpointer.py` — onde mora uma execução congelada
+Escolhe o checkpointer: `PostgresSaver` quando o banco responde, `MemorySaver` como fallback.
+A diferença não é de conforto. Com o checkpointer em memória, uma ação parada no `interrupt()`
+só existe para o processo que a pausou — a ingestão pausa e a interface não vê nada. Com o
+Postgres, o estado congelado é uma linha do banco: quem pausa e quem retoma podem ser
+processos diferentes. `status()` devolve (tipo, motivo) para a interface avisar o operador
+quando caiu para memória. `CHECKPOINTER=memory` força o fallback (é o que os testes usam).
+
+**Mexa aqui quando:** trocar o backend de persistência do grafo.
+
+### `agent/ingest.py` — a plataforma recebendo chamados
+Roda o grafo sobre todos os tickets **sem aprovar nada sozinho**: o que exige escrita congela
+e vai para `fila_aprovacoes`. É o oposto do `eval/runner.py`, que aprova todo `interrupt()`
+automaticamente porque precisa pontuar a trajetória inteira sem operador. Também anota a
+decisão esperada e a nota de trajetória quando o ticket tem gabarito, o que faz "operar" e
+"medir" produzirem as mesmas linhas. É o que `make demo` e `make ingest` executam.
+
+**Mexa aqui quando:** mudar o que a plataforma faz ao receber um ticket.
+
 ### `agent/graph/state.py` — o contrato entre os nós
 O `AgentState`: tudo que trafega de um nó a outro. Os campos com `Annotated[..., operator.add]`
 acumulam em vez de sobrescrever — é assim que `trace` e `tools_called` crescem a cada passada.
@@ -81,9 +100,13 @@ atributos de domínio. `log_evaluations()` manda as notas do juiz para a aba **E
 
 **Mexa aqui quando:** quiser rastrear um atributo novo ou mudar o destino dos traces.
 
-### `agent/logging/postgres.py` — histórico
-A tabela `execucoes` e as funções de consulta. `check_health()` diz **por que** a conexão
-falhou, em vez de devolver `None` mudo.
+### `agent/logging/postgres.py` — histórico e fila
+Duas tabelas. `execucoes` é o registro de tickets processados — ganhou `thread_id`, `status`,
+`split` e a avaliação, deixando de ser só log para virar a fonte das métricas da interface.
+`fila_aprovacoes` é a caixa de entrada do operador: uma linha por ação congelada, com o
+`thread_id` que permite retomá-la. `estatisticas_autonomia()` conta a execução **mais recente
+de cada ticket** — somar toda linha faria um ticket rodado cinco vezes pesar cinco vezes.
+`check_health()` diz **por que** a conexão falhou, em vez de devolver `None` mudo.
 
 ### `agent/version.py` — a versão do agente
 Uma constante. É a chave do cache de decisões e o nome do projeto no Phoenix. **Bumpe sempre

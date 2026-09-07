@@ -1,5 +1,5 @@
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
+from .checkpointer import build_checkpointer
 from .state import AgentState
 from .nodes import investigate, quality_check, decide, respond, act, escalate
 
@@ -82,9 +82,11 @@ def build_graph() -> StateGraph:
     graph.add_edge("act", END)
     graph.add_edge("escalate", END)
 
-    # MemorySaver persiste o estado do grafo, permitindo o interrupt() (HITL)
-    # pausar e depois retomar a execução de onde parou.
-    return graph.compile(checkpointer=MemorySaver())
+    # O checkpointer guarda o estado do grafo, permitindo que o interrupt() (HITL)
+    # pause a execução e alguém a retome depois. Ele é persistente (Postgres)
+    # sempre que o banco responde: é o que permite que a ingestão pause um ticket
+    # num processo e a interface o retome em outro, horas depois.
+    return graph.compile(checkpointer=build_checkpointer())
 
 
 # Instância compilada do grafo

@@ -6,6 +6,10 @@ requires-python = ">=3.11"
 dependencies = [
     # Orquestração do agente
     "langgraph==1.2.11",
+    # Checkpointer persistente: e o que permite uma acao pausada no HITL
+    # sobreviver ao processo e ser retomada pela interface (ver agent/graph/checkpointer.py).
+    "langgraph-checkpoint-postgres>=3.1,<4",
+    "psycopg[binary]>=3.2,<4",
     "langchain-core>=1.6,<2",
     "langchain-openai>=1.6,<2",
     "openai>=3,<4",

@@ -109,8 +109,8 @@ Três decisões que governam o comportamento:
 ### Stack
 
 LangGraph (orquestração) · MCP sobre stdio (18 tools) · Phoenix + OpenTelemetry
-(observabilidade) · Postgres (log de execuções) · Streamlit (demonstração) · Pydantic
-(saída estruturada).
+(observabilidade) · Postgres (checkpoints do grafo, fila de aprovações e histórico de
+execuções) · Streamlit (demonstração) · Pydantic (saída estruturada).
 
 Todos os LLMs vêm de **APIs gratuitas**, encadeadas com *fallback* automático entre
 provedores — a cota diária de um deles estourou no meio de uma avaliação e derrubou cinco
@@ -167,8 +167,15 @@ Precisa de **Python 3.11 ou 3.12** (o `make setup` baixa a versão certa via `uv
 
 ```bash
 make setup      # venv na raiz + dependências (agente e API) + dados sintéticos
+make demo       # sobe tudo, processa os 17 tickets e abre a plataforma pronta
+```
+
+Ou passo a passo:
+
+```bash
 make up         # API industrial em :8000 — Swagger em /docs
-make up-obs     # Postgres :5432 + Phoenix :6006, com a tabela de execuções
+make up-obs     # Postgres :5432 + Phoenix :6006, com o schema criado
+make ingest     # processa os tickets: decide, e congela o que exige aprovação
 make ui         # console Streamlit em :8501
 ```
 
@@ -214,6 +221,24 @@ make test                                        # 39 testes da API industrial
 
 ---
 
+### A fila de aprovações é estado persistente
+
+O `interrupt()` congela o grafo antes de qualquer escrita na plataforma da Tractian. Esse
+estado congelado vive no **`PostgresSaver`**, não em memória — o que separa uma demonstração
+de uma plataforma:
+
+- `make ingest` pausa um ticket num processo; a interface o retoma em outro, pela aba
+  **Notificações**, usando o `thread_id` gravado em `fila_aprovacoes`;
+- reiniciar a interface não perde ação nenhuma que esteja esperando decisão;
+- a taxa de autonomia sai de contar linhas do banco, não de reprocessar nada.
+
+`make ingest` e `make eval` rodam o mesmo grafo e diferem só no `interrupt()`: a avaliação
+**aprova sozinha** (não há operador, e ela precisa pontuar a trajetória inteira), a ingestão
+**congela e enfileira**. A ingestão também grava a decisão esperada e a nota de trajetória
+quando o ticket tem gabarito, de modo que operar e medir deixam de ser dois mundos.
+
+---
+
 ## Limitações conhecidas
 
 - **Amostra pequena.** 13 tickets de treino, 4 de teste, 6 derivados. Cada caso do teste vale
@@ -225,6 +250,10 @@ make test                                        # 39 testes da API industrial
   três rodadas. As versões anteriores à v7 têm números de rodada única.
 - **O conjunto de teste foi consumido.** Qualquer ajuste feito olhando aqueles 4 tickets os
   transformaria em treino.
+- **A fila não tem controle de acesso.** Qualquer pessoa com a interface aberta aprova
+  qualquer ação; não há papéis, nem verificação de quem confirmou. `resolvido_por` grava
+  sempre `operador`. Num sistema real, autorizar uma escrita em ativo industrial exigiria
+  identidade e trilha de auditoria de verdade.
 
 ---
 

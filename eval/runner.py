@@ -39,14 +39,14 @@ def run_graph(state: dict) -> dict:
     Com checkpointer, o langgraph retorna o estado pausado com a chave
     `__interrupt__` — capturamos e retomamos com aprovação.
     """
-    # thread_id único por execução evita retomar checkpoints antigos no MemorySaver
+    # thread_id único por execução evita retomar um checkpoint antigo do mesmo ticket
     run_id = f"{state['ticket_id']}-run-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
     config = {"configurable": {"thread_id": run_id}}
     # `Interrupt` do LangGraph é um dataclass, não uma exceção: um
     # `except Interrupt` era invalido e, sempre que algo estourava aqui dentro,
     # o Python falhava ao avaliar a clausula e MASCARAVA o erro real com
     # "catching classes that do not inherit from BaseException".
-    # Com MemorySaver o interrupt nao levanta excecao mesmo: volta em __interrupt__.
+    # O interrupt nao levanta excecao: o estado volta com a chave __interrupt__.
     result = agent_graph.invoke(state, config=config)
     if "__interrupt__" in result:
         result = agent_graph.invoke(Command(resume=True), config=config)

@@ -79,7 +79,7 @@ up-api: ## Só a API industrial (:8000) em background
 	@powershell -Command "Start-Sleep -Seconds 2"
 	@echo "✓ API iniciada em background (:8000)"
 
-demo: ## Prepara TUDO e abre a plataforma pronta para demonstrar
+demo: ## Sobe a plataforma com todos os tickets ja processados
 	@echo "1/4  API industrial"
 	$(UP_API_CMD)
 	@powershell -Command "Start-Sleep -Seconds 3"
@@ -87,15 +87,17 @@ demo: ## Prepara TUDO e abre a plataforma pronta para demonstrar
 	docker compose up -d postgres-agent phoenix
 	@powershell -Command "$$ok=$$false; for($$i=0;$$i -lt 40;$$i++){ try{ Invoke-WebRequest -Uri http://localhost:6006 -UseBasicParsing -TimeoutSec 2 | Out-Null; $$ok=$$true; break }catch{ Start-Sleep -Seconds 2 } }"
 	$(PY) -c "from agent.logging.postgres import init_db; init_db()"
-	@echo "3/4  Avaliacao (popula metricas, autonomia e traces no Phoenix)"
-	$(PY) -m eval.runner --split train --no-judge
+	@echo "3/4  Ingestao dos tickets (~6 min: 17 tickets x ~21s)"
+	@echo "     Acoes que exigem escrita ficam congeladas na fila de aprovacoes."
+	$(PY) -m agent.ingest
 	@echo "4/4  Console Streamlit"
-	@echo ""
-	@echo "    A fila de aprovacoes vive na sessao do navegador — rodar por aqui nao a"
-	@echo "    preenche. Na aba Aprovacoes ha um botao que processa so os tickets que"
-	@echo "    exigem confirmacao (~40s), para demonstrar o HITL."
-	@echo ""
 	$(PY) -m streamlit run app.py
+
+ingest: ## Processa todos os tickets na plataforma (fila de aprovacoes no Postgres)
+	$(PY) -m agent.ingest
+
+ingest-derivados: ## Ingestao incluindo os 6 cenarios derivados (23 tickets)
+	$(PY) -m agent.ingest --derivados
 
 up-agent: ## Sobe a interface Streamlit (:8501)
 	$(PY) -m streamlit run app.py

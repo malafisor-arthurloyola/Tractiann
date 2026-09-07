@@ -540,3 +540,66 @@ class TestCuradoriaEvidencia:
     def test_payload_nao_dict_passa_intacto(self):
         from agent.graph.nodes import _resumir_evidencia
         assert _resumir_evidencia("rms", None) is None
+
+
+class TestSplitDaIngestao:
+    """Duas armadilhas do `eval/split.json`, ambas encontradas rodando a ingestão.
+
+    O rótulo de conjunto alimenta a tabela de autonomia por split na interface;
+    errado, ele não quebra nada de forma visível — só reporta números atribuídos
+    ao conjunto errado, que é o pior tipo de bug num material de avaliação.
+    """
+
+    def test_split_e_indexado_por_case_id_nao_por_ticket_id(self):
+        """`split.json` lista `case_tkt_inv_09`, não `TKT-INV-09`."""
+        from agent.ingest import _split_de
+        assert _split_de({"id": "case_tkt_inv_09", "ticket_id": "TKT-INV-09"}) == "train"
+        assert _split_de({"id": "case_tkt_exe_14", "ticket_id": "TKT-EXE-14"}) == "test"
+
+    def test_chaves_de_comentario_nao_sao_listas_de_tickets(self):
+        """As chaves `_comment` e `_regra` são strings.
+
+        Sem filtrá-las, `case_id in ids` roda contra uma string e vira busca de
+        substring — nunca casa, e todo ticket caía no rótulo padrão.
+        """
+        import json
+        from pathlib import Path
+        from agent.ingest import _split_de, RAIZ
+
+        mapa = json.loads((RAIZ / "eval/split.json").read_text(encoding="utf-8"))
+        assert any(k.startswith("_") for k in mapa), "o arquivo deixou de ter comentários"
+        # Um id inexistente não pode ser atribuído a nenhum split de verdade.
+        assert _split_de({"id": "case_inexistente"}) == "avulso"
+
+    def test_cenarios_derivados_tem_rotulo_proprio(self):
+        from agent.ingest import _split_de
+        assert _split_de({"id": "case_der_01", "ticket_id": "DER-01"}) == "derivados"
+
+    def test_todo_caso_real_recebe_um_rotulo_conhecido(self):
+        import json
+        from agent.ingest import _split_de, RAIZ
+
+        casos = json.loads((RAIZ / "agent-input/cases.json").read_text(encoding="utf-8"))
+        casos += json.loads((RAIZ / "agent-input/cases-derivados.json").read_text(encoding="utf-8"))
+        rotulos = [_split_de(c) for c in casos]
+        assert "avulso" not in rotulos, "algum caso do repositório ficou sem conjunto"
+        assert set(rotulos) == {"train", "test", "derivados"}
+
+
+class TestCheckpointer:
+    """O checkpointer decide se uma ação pausada sobrevive ao processo."""
+
+    def test_testes_rodam_em_memoria(self):
+        """O conftest força `CHECKPOINTER=memory`.
+
+        A suíte não pode depender de um container Postgres de pé, nem sujar o
+        banco de desenvolvimento com checkpoints de execuções fictícias.
+        """
+        from agent.graph.checkpointer import status
+        tipo, _ = status()
+        assert tipo == "memory"
+
+    def test_grafo_expoe_um_checkpointer(self):
+        """Sem checkpointer o `interrupt()` não pausa — ele simplesmente não existe."""
+        from agent.graph.agent import agent_graph
+        assert agent_graph.checkpointer is not None

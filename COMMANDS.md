@@ -240,31 +240,69 @@ make test                                          # 39 testes da API industrial
 
 ### `make demo`
 
-> **Descrição:** Prepara tudo e abre a plataforma pronta para demonstrar. Use antes de uma
+> **Descrição:** Sobe a plataforma com todos os tickets já processados. Use antes de uma
 > apresentação.
 > **O que ele faz, em ordem:**
 > 1. Sobe a API industrial (`:8000`).
-> 2. Sobe Postgres e Phoenix, esperando o Phoenix aceitar conexões, e cria a tabela.
-> 3. Roda a avaliação no treino — isso popula as **métricas**, a **taxa de autonomia** e os
->    **traces no Phoenix**.
-> 4. Abre o console Streamlit.
+> 2. Sobe Postgres e Phoenix, esperando o Phoenix aceitar conexões, e cria/atualiza o schema.
+> 3. **Ingere os 17 tickets** (`python -m agent.ingest`) — cada um é investigado e decidido.
+>    Toda ação que exigiria escrita na plataforma **congela na fila de aprovações**.
+> 4. Abre o console Streamlit, já com métricas, traces e a caixa de entrada populados.
 
 ```bash
 make demo
 ```
 
-> **A ressalva que importa:** a fila de aprovações do HITL vive na **sessão do navegador**.
-> Rodar a avaliação por fora não a preenche, porque o runner aprova os `interrupt()`
-> automaticamente. Para demonstrar o HITL, use o botão na aba **Aprovações** — ele processa
-> apenas os tickets que exigem confirmação (~40s em vez dos ~6 min de rodar os 17).
+> **Duração:** ~6 minutos (17 tickets × ~21s). O custo é das chamadas à API industrial —
+> são 9 por ticket, e o cache de decisão poupa o LLM, não as tools.
 
-### O que fica pronto ao abrir
+### Ingestão ≠ avaliação
 
-| aba | disponível sem rodar nada? |
+São dois modos de rodar o mesmo grafo sobre os mesmos tickets, e a diferença está
+inteiramente no tratamento do `interrupt()`:
+
+| | `make eval` (avaliação) | `make ingest` (plataforma) |
+| :--- | :--- | :--- |
+| pergunta que responde | o agente decide certo? | o que o agente quer fazer agora? |
+| ao chegar num `interrupt()` | **aprova sozinho**, para pontuar a trajetória inteira | **congela** e enfileira para um humano |
+| onde grava | `eval/results-<split>.json` | tabelas `execucoes` e `fila_aprovacoes` |
+| deixa fila pendente? | nunca, por construção | sim — é o ponto |
+
+A ingestão também avalia: quando o ticket tem gabarito, a decisão esperada e a nota de
+trajetória são gravadas junto. Por isso a aba **Notificações** mostra acerto de decisão
+sem depender de nenhum arquivo de avaliação.
+
+```bash
+make ingest              # os 17 tickets
+make ingest-derivados    # 17 + os 6 cenários derivados
+```
+
+```bash
+.venv/Scripts/python.exe -m agent.ingest --tickets TKT-INV-09 TKT-EXE-12
+```
+
+### Por que a fila sobrevive a reinícios
+
+O grafo usa o **`PostgresSaver`** como checkpointer (`agent/graph/checkpointer.py`). Uma
+execução congelada no `interrupt()` é uma linha no banco, não um objeto na memória do
+processo. Consequências práticas:
+
+- a ingestão pausa num processo e a interface retoma em outro;
+- fechar o navegador ou reiniciar o Streamlit não perde ação nenhuma;
+- o `thread_id` guardado em `fila_aprovacoes` é a chave que o botão **Aprovar** usa para
+  chamar `Command(resume=True)` no checkpoint certo.
+
+Sem Postgres, o sistema cai para `MemorySaver` e avisa na aba — a fila fica vazia porque
+não há onde compartilhar o estado. `CHECKPOINTER=memory` força esse modo (é o que a suíte
+de testes usa, para não depender de um container).
+
+### O que fica pronto depois do `make demo`
+
+| aba | disponível? |
 | :--- | :--- |
+| Notificações → caixa de entrada | sim — as ações congeladas na ingestão |
+| Notificações → autonomia e acerto | sim — lidos das tabelas do Postgres |
 | Métricas & Avaliação | sim — lê de `eval/results-*.json` |
-| Aprovações → autonomia | sim — mesma fonte |
-| Aprovações → fila | não — use o botão da aba |
-| Diagnóstico & HITL | não — precisa executar um ticket |
-| Trace & Sinais | não — precisa executar um ticket |
-| Phoenix (`:6006`) | sim — traces persistidos no Postgres |
+| Phoenix (`:6006`) | sim — um trace por ticket ingerido |
+| Diagnóstico & HITL | precisa abrir um ticket na barra lateral |
+| Trace & Sinais | precisa executar um ticket na sessão |

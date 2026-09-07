@@ -38,6 +38,16 @@ load_dotenv(ROOT / "agent" / ".env")
 from agent.graph.agent import agent_graph
 from agent.logging.postgres import log_execution, count_by_version, compare_versions
 from agent.logging.postgres import check_health as postgres_health
+from agent.logging.postgres import (
+    registrar_ticket,
+    enfileirar_aprovacao,
+    listar_pendencias,
+    resolver_pendencia,
+    historico_aprovacoes,
+    estatisticas_autonomia,
+    listar_tickets,
+)
+from agent.graph.checkpointer import status as checkpointer_status
 from agent.logging.phoenix import setup_phoenix_tracing, run_in_phoenix_trace
 from agent.version import AGENT_VERSION
 from eval.runner import build_initial_state
@@ -386,19 +396,22 @@ def format_case_option(case: Dict[str, Any]) -> str:
 
 # ── Execução do Grafo com HITL Interativo ───────────────────────────────────
 def execute_agent_stepwise(case: Dict[str, Any]) -> Tuple[Dict[str, Any], float, bool]:
-    """
-    Executa o grafo do agente mantendo checkpoint no LangGraph MemorySaver.
-    Retorna (result_or_interrupted_state, elapsed_time, is_interrupted).
+    """Executa o grafo de um ticket, parando no `interrupt()` se houver.
+
+    Retorna (estado, tempo, pausado). Quando pausa, a ação vai para a fila de
+    aprovações no Postgres — a mesma fila que a ingestão alimenta. Assim um
+    ticket disparado aqui aparece na aba Notificações como qualquer outro, e
+    continua lá se o navegador fechar.
     """
     _init_tracing()
     start = time.time()
     state = build_initial_state(case)
     ticket_id = case["ticket_id"]
 
-    # thread_id novo a cada execução: o MemorySaver guarda o checkpoint por
-    # thread, então reusar o ticket_id fazia a re-execução cair num checkpoint
-    # antigo (já pausado ou finalizado). O id fica na sessão para o resume do
-    # HITL retomar exatamente esta execução.
+    # thread_id novo a cada execução: o checkpointer guarda o estado por thread,
+    # então reusar o ticket_id cairia num checkpoint antigo (já pausado ou
+    # finalizado). O id é a chave para retomar exatamente esta execução, e vai
+    # junto para a fila — é assim que outro processo consegue continuá-la.
     thread_id = f"{ticket_id}-{int(time.time() * 1000)}"
     st.session_state[f"thread_{ticket_id}"] = thread_id
     config = {"configurable": {"thread_id": thread_id}}
@@ -407,35 +420,51 @@ def execute_agent_stepwise(case: Dict[str, Any]) -> Tuple[Dict[str, Any], float,
         result = agent_graph.invoke(state, config=config)
     elapsed = time.time() - start
 
-    # Verifica se o grafo pausou em um interrupt() do HITL
-    if "__interrupt__" in result:
-        # Registra já na pausa: um ticket abandonado no interrupt (o operador
-        # nunca confirma nem cancela) sumia do histórico do Postgres, porque só
-        # o caminho completo e o resume gravavam.
+    pausado = "__interrupt__" in result
+    try:
+        # Registra também na pausa: um ticket abandonado no interrupt (o operador
+        # nunca confirma nem cancela) sumia do histórico, porque só o caminho
+        # completo e o resume gravavam.
+        registrar_ticket(
+            result, agent_version=AGENT_VERSION, thread_id=thread_id,
+            status="aguardando_humano" if pausado else "concluido",
+            split="avulso",
+        )
+    except Exception:
+        pass
+
+    if pausado:
         try:
-            log_execution(result, agent_version=AGENT_VERSION)
+            enfileirar_aprovacao(
+                ticket_id=ticket_id, thread_id=thread_id,
+                agent_version=AGENT_VERSION, asset_id=case.get("asset_id"),
+                payload=result["__interrupt__"][0].value,
+            )
         except Exception:
             pass
         return result, elapsed, True
 
-    # Gravação no Postgres se a execução terminou
-    try:
-        log_execution(result, agent_version=AGENT_VERSION)
-    except Exception:
-        pass
-
     return result, elapsed, False
 
 
-def resume_agent_action(ticket_id: str, confirm: bool) -> Dict[str, Any]:
-    """Retoma a execução do grafo após confirmação ou cancelamento humano."""
-    # Mesmo thread_id da execução que pausou (ver execute_agent_stepwise).
-    thread_id = st.session_state.get(f"thread_{ticket_id}", ticket_id)
+def resume_agent_action(ticket_id: str, confirm: bool,
+                        thread_id: Optional[str] = None) -> Dict[str, Any]:
+    """Retoma um grafo congelado no HITL e fecha a pendência correspondente.
+
+    `thread_id` explícito é o que permite retomar da aba Notificações uma
+    execução que **outro processo** pausou — a ingestão, por exemplo. Sem ele,
+    cai no id guardado na sessão (o caminho de quem rodou o ticket aqui mesmo).
+    """
+    thread_id = thread_id or st.session_state.get(f"thread_{ticket_id}", ticket_id)
     config = {"configurable": {"thread_id": thread_id}}
     with run_in_phoenix_trace(thread_id, ticket_id):
         resumed = agent_graph.invoke(Command(resume=confirm), config=config)
     try:
-        log_execution(resumed, agent_version=AGENT_VERSION)
+        registrar_ticket(
+            resumed, agent_version=AGENT_VERSION, thread_id=thread_id,
+            status="concluido" if confirm else "cancelado", split="avulso",
+        )
+        resolver_pendencia(thread_id, aprovado=confirm, por="operador")
     except Exception:
         pass
     return resumed
@@ -1374,180 +1403,235 @@ def tab_metricas():
 
 
 # ── Componentes de UI: Aba Playground (Ticket Customizado) ───────────────────
-def _tickets_pendentes() -> list:
-    """Tickets pausados num interrupt() nesta sessão, aguardando decisão humana.
+def _tempo_de_espera(criado_em) -> str:
+    """Há quanto tempo a ação está congelada esperando decisão.
 
-    O grafo congela no `act` e o estado fica no checkpointer até alguém retomar —
-    pode ficar assim indefinidamente. Sem uma lista, o operador só descobre que
-    há um caso parado se voltar naquele ticket por acaso.
+    Numa fila de manutenção o tempo de espera é informação operacional, não
+    enfeite: uma ação de reprocessamento parada há dias significa que o ativo
+    seguiu sendo monitorado com um modelo que o próprio agente considerou
+    suspeito.
     """
-    pendentes = []
-    for chave, valor in st.session_state.items():
-        if not (isinstance(chave, str) and chave.startswith("is_interrupted_") and valor):
+    if not criado_em:
+        return "—"
+    agora = datetime.now(timezone.utc)
+    delta = agora - (criado_em if criado_em.tzinfo else criado_em.replace(tzinfo=timezone.utc))
+    segundos = int(delta.total_seconds())
+    if segundos < 60:
+        return f"{segundos}s"
+    if segundos < 3600:
+        return f"{segundos // 60}min"
+    if segundos < 86400:
+        return f"{segundos // 3600}h"
+    return f"{segundos // 86400}d"
+
+
+def _render_pendencia(p: dict, indice: int):
+    """Um item da caixa de entrada, com o contexto necessário para decidir.
+
+    O operador precisa de três coisas antes de autorizar uma escrita: o que o
+    agente quer fazer, por quê, e o que ele admite não saber. As lacunas vêm em
+    destaque justamente porque são o argumento contra aprovar no automático.
+    """
+    espera = _tempo_de_espera(p.get("criado_em"))
+    titulo = (f"{p['ticket_id']} · {p.get('action_type') or 'ação'} "
+              f"em {p.get('action_target') or '—'} · aguardando há {espera}")
+
+    with st.expander(titulo, expanded=(indice == 0)):
+        c1, c2, c3 = st.columns(3)
+        c1.markdown(f"**Ativo**  \n`{p.get('asset_id') or '—'}`")
+        c2.markdown(f"**Ação solicitada**  \n`{p.get('action_type') or '—'}`")
+        c3.markdown(f"**Alvo**  \n`{p.get('action_target') or '—'}`")
+
+        if p.get("justification"):
+            st.markdown("**Justificativa do agente**")
+            st.info(p["justification"])
+
+        lacunas = p.get("gaps") or {}
+        if lacunas:
+            st.markdown(f"**Lacunas de dado reconhecidas ({len(lacunas)})**")
+            st.warning(
+                # Os valores chegam como lista (uma categoria pode acumular mais de
+                # um motivo). Interpolar direto imprimiria o `repr` do Python —
+                # colchetes e aspas — no meio de um texto que um operador vai ler.
+                "\n".join(
+                    f"- `{k}`: " + ("; ".join(str(x) for x in v) if isinstance(v, list) else str(v))
+                    for k, v in lacunas.items()
+                ),
+                icon="⚠️",
+            )
+            st.caption(
+                "O agente sabe que decidiu sem esses dados. É por isso que a ação "
+                "para aqui em vez de ser executada."
+            )
+        else:
+            st.caption("O agente não reportou lacunas de dado para esta decisão.")
+
+        st.caption(f"`thread_id` = `{p['thread_id']}` — a chave do checkpoint que "
+                   "será retomado.")
+
+        col_ok, col_no, _ = st.columns([1, 1, 2])
+        chave = p["thread_id"]
+        if col_ok.button("Aprovar e executar", type="primary", key=f"ok_{chave}"):
+            with st.spinner("Executando a ação na plataforma..."):
+                try:
+                    resumed = resume_agent_action(p["ticket_id"], True, thread_id=chave)
+                    st.session_state[f"result_{p['ticket_id']}"] = resumed
+                    st.session_state[f"is_interrupted_{p['ticket_id']}"] = False
+                except Exception as e:
+                    st.error(f"Falha ao executar: {e}")
+                    return
+            st.success(f"Ação executada em {p['ticket_id']}.", icon="✓")
+            st.rerun()
+
+        if col_no.button("Recusar", key=f"no_{chave}"):
+            with st.spinner("Cancelando..."):
+                try:
+                    resumed = resume_agent_action(p["ticket_id"], False, thread_id=chave)
+                    st.session_state[f"result_{p['ticket_id']}"] = resumed
+                    st.session_state[f"is_interrupted_{p['ticket_id']}"] = False
+                except Exception as e:
+                    st.error(f"Falha ao cancelar: {e}")
+                    return
+            st.info(f"Ação recusada em {p['ticket_id']}.", icon="🚫")
+            st.rerun()
+
+
+def _tabela_autonomia() -> pd.DataFrame:
+    """Autonomia por conjunto, contada nas linhas de `execucoes` do Postgres.
+
+    Sai do banco, e não de `eval/results-*.json`, porque a pergunta é sobre o
+    que a plataforma processou — inclusive tickets sem gabarito, que arquivo de
+    avaliação nenhum contém.
+    """
+    linhas = []
+    for split, rotulo in (("train", "treino"), ("test", "teste held-out"),
+                          ("derivados", "derivados"), ("avulso", "avulsos")):
+        d = estatisticas_autonomia(AGENT_VERSION, split=split)
+        if not d["total"]:
             continue
-        ticket_id = chave[len("is_interrupted_"):]
-        resultado = st.session_state.get(f"result_{ticket_id}") or {}
-        payload = {}
-        if "__interrupt__" in resultado and resultado["__interrupt__"]:
-            payload = resultado["__interrupt__"][0].value
-        pendentes.append({
-            "ticket_id": ticket_id,
-            "action_type": payload.get("action_type") or "—",
-            "action_target": payload.get("action_target") or "—",
-            "asset_id": payload.get("asset_id") or "—",
-            "gaps": len(payload.get("gaps") or {}),
+        linhas.append({
+            "Conjunto": rotulo,
+            "Tickets": d["total"],
+            "Sem intervenção": d["autonomos"],
+            "Exigiram humano": d["com_humano"],
+            "Autonomia": f"{d['autonomos'] / d['total']:.0%}",
         })
-    return pendentes
-
-
-def _autonomia_do_conjunto(split: str) -> dict | None:
-    """Quantos tickets o agente resolveu sozinho e quantos exigiriam um humano.
-
-    `act` é a única decisão que passa por confirmação — mutação na plataforma da
-    Tractian. `orient` e `escalate` não escrevem nada e correm de ponta a ponta.
-    """
-    caminho = _caminho_resultados(split)
-    if not caminho.exists():
-        return None
-    dados = json.loads(caminho.read_text(encoding="utf-8"))
-    resultados = dados.get("results", [])
-    if not resultados:
-        return None
-    com_humano = [r for r in resultados if r.get("decision") == "act"]
-    return {
-        "total": len(resultados),
-        "autonomos": len(resultados) - len(com_humano),
-        "com_humano": len(com_humano),
-        "tickets": [r.get("ticket_id") for r in com_humano],
-    }
-
-
-def _tickets_que_exigem_aprovacao(split: str = "train") -> list:
-    """Tickets que, na última avaliação, terminaram em `act`.
-
-    Só esses passam pelo HITL. Processar apenas eles enche a fila em segundos, em
-    vez dos ~6 minutos que levaria rodar os 17 — e é o suficiente para demonstrar
-    o mecanismo.
-    """
-    caminho = _caminho_resultados(split)
-    if not caminho.exists():
-        return []
-    dados = json.loads(caminho.read_text(encoding="utf-8"))
-    return [r.get("ticket_id") for r in dados.get("results", []) if r.get("decision") == "act"]
-
-
-def _preencher_fila(cases: List[Dict[str, Any]]) -> int:
-    """Roda os tickets que exigem aprovação e os deixa pausados no interrupt.
-
-    A fila do HITL vive na sessão do navegador: rodar por fora (`make eval`)
-    preenche métricas e Phoenix, mas não deixa nada pendente — o runner aprova os
-    interrupts automaticamente. Para a fila ter conteúdo, a execução precisa
-    acontecer aqui.
-    """
-    alvos = _tickets_que_exigem_aprovacao()
-    if not alvos:
-        return 0
-    por_id = {c["ticket_id"]: c for c in cases}
-    barra = st.progress(0.0, text="Processando...")
-    pausados = 0
-    for i, ticket_id in enumerate(alvos, 1):
-        caso = por_id.get(ticket_id)
-        if not caso:
-            continue
-        barra.progress(i / len(alvos), text=f"Processando {ticket_id}...")
-        try:
-            resultado, elapsed, interrompido = execute_agent_stepwise(caso)
-            st.session_state[f"result_{ticket_id}"] = resultado
-            st.session_state[f"elapsed_{ticket_id}"] = elapsed
-            st.session_state[f"is_interrupted_{ticket_id}"] = interrompido
-            pausados += bool(interrompido)
-        except Exception as e:
-            st.warning(f"{ticket_id} falhou: {e}", icon="⚠️")
-    barra.empty()
-    return pausados
+    return pd.DataFrame(linhas)
 
 
 def tab_notificacoes(cases: List[Dict[str, Any]]):
-    """Fila de aprovações pendentes e taxa de autonomia do agente."""
-    st.markdown("### Aprovações pendentes")
+    """Caixa de entrada do operador: o que o agente quer fazer e ainda não fez.
 
-    pendentes = _tickets_pendentes()
+    Toda a aba lê do Postgres. É o que permite que um ticket ingerido por
+    `make demo` — outro processo, minutos antes — apareça aqui esperando
+    decisão, e continue esperando depois de reiniciar a interface.
+    """
+    tipo_cp, motivo_cp = checkpointer_status()
+    if tipo_cp != "postgres":
+        st.error(
+            f"**Checkpointer em memória** ({motivo_cp}). Ações pausadas morrem "
+            "com este processo e não são visíveis para outros — a fila abaixo "
+            "ficará vazia mesmo com tickets congelados.",
+            icon="⚠️",
+        )
+        st.code("make postgres-up\nmake postgres-init", language="bash")
 
-    if not pendentes:
-        alvos = _tickets_que_exigem_aprovacao()
-        if alvos:
+    pendentes = listar_pendencias(AGENT_VERSION)
+
+    st.markdown("### Caixa de entrada")
+    st.caption(
+        "Cada item é uma execução congelada: o agente decidiu escrever na "
+        "plataforma da Tractian e o grafo parou no `interrupt()` antes de fazê-lo. "
+        "Nada é executado sem uma decisão aqui."
+    )
+
+    if pendentes:
+        st.warning(
+            f"**{len(pendentes)}** ação(ões) aguardando decisão humana.",
+            icon="🔔",
+        )
+        for i, p in enumerate(pendentes):
+            _render_pendencia(p, i)
+    else:
+        st.success("Nenhuma ação pendente.", icon="✓")
+        stats = estatisticas_autonomia(AGENT_VERSION)
+        if not stats["total"]:
             st.info(
-                f"A fila está vazia porque nenhum ticket foi executado nesta sessão. "
-                f"Pela última avaliação, **{len(alvos)}** exigem aprovação: "
-                f"`{'`, `'.join(alvos)}`.",
+                "Nenhum ticket foi processado ainda. Rode a ingestão para a "
+                "plataforma receber os chamados:",
                 icon="💡",
             )
-            if st.button(f"Processar os {len(alvos)} tickets que exigem aprovação",
-                         type="primary", key="btn_preencher_fila"):
-                pausados = _preencher_fila(cases)
-                if pausados:
-                    st.success(f"{pausados} ticket(s) aguardando sua decisão.", icon="✓")
-                else:
-                    st.info("Nenhum ticket pausou — as decisões podem ter mudado desde a "
-                            "última avaliação.", icon="ℹ️")
-                st.rerun()
-    if pendentes:
-        st.warning(f"{len(pendentes)} ticket(s) aguardando decisão humana. "
-                   "O grafo está congelado neles até alguém confirmar ou cancelar.", icon="⚠️")
-        st.dataframe(
-            pd.DataFrame([{
-                "Ticket": p["ticket_id"],
-                "Ação solicitada": p["action_type"],
-                "Alvo": p["action_target"],
-                "Ativo": p["asset_id"],
-                "Lacunas de dado": p["gaps"],
-            } for p in pendentes]),
-            width="stretch", hide_index=True,
-        )
-        st.caption("Abra o ticket na barra lateral e vá para a aba **Diagnóstico & HITL** "
-                   "para confirmar ou cancelar.")
-    else:
-        st.success("Nenhuma aprovação pendente nesta sessão.", icon="✓")
-
-    st.caption(
-        "A fila cobre **esta sessão**. O grafo usa o `MemorySaver`, que guarda o checkpoint em "
-        "memória do processo — reiniciar a aplicação descarta execuções pausadas. Em produção, "
-        "trocar por um checkpointer persistente (Postgres) faria a fila sobreviver a reinícios."
-    )
+            st.code("make demo        # sobe tudo e ingere os tickets\n"
+                    "make ingest      # só a ingestão, com a plataforma já de pé",
+                    language="bash")
+        else:
+            st.caption(f"{stats['total']} ticket(s) processado(s), todos resolvidos "
+                       "sem intervenção ou já decididos.")
 
     st.markdown("---")
-    st.markdown("### Autonomia por conjunto")
+    st.markdown("### Autonomia")
     st.caption(
-        "Só a decisão `agir` passa por confirmação humana — é a única que escreve na "
-        "plataforma. `orientar` e `escalar` não alteram estado e correm de ponta a ponta. "
-        "Os números vêm dos arquivos `eval/results-*.json`, então sobrevivem a reinícios."
+        "`agir` é a única decisão que passa por confirmação — é a única que "
+        "escreve na plataforma. `orientar` e `escalar` não alteram estado e "
+        "correm de ponta a ponta."
     )
 
-    linhas = []
-    for split, rotulo in (("train", "treino"), ("test", "teste held-out"), ("derivados", "derivados")):
-        dados = _autonomia_do_conjunto(split)
-        if not dados:
-            continue
-        pct = dados["autonomos"] / dados["total"]
-        linhas.append({
-            "Conjunto": rotulo,
-            "Tickets": dados["total"],
-            "Resolvidos sem humano": dados["autonomos"],
-            "Exigiram confirmação": dados["com_humano"],
-            "Autonomia": f"{pct:.0%}",
-            "Quais exigiram": ", ".join(dados["tickets"]) or "—",
-        })
-
-    if linhas:
-        st.dataframe(pd.DataFrame(linhas), width="stretch", hide_index=True)
-        total = sum(l["Tickets"] for l in linhas)
-        humanos = sum(l["Exigiram confirmação"] for l in linhas)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Tickets avaliados", total)
-        c2.metric("Sem intervenção", total - humanos, f"{(total-humanos)/total:.0%}")
-        c3.metric("Com confirmação", humanos, f"{humanos/total:.0%}")
+    df = _tabela_autonomia()
+    if df.empty:
+        st.info("Sem tickets processados nesta versão do agente.")
     else:
-        st.info("Nenhum resultado de avaliação salvo ainda. Rode `make eval` ou use a aba Métricas.")
+        geral = estatisticas_autonomia(AGENT_VERSION)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Tickets processados", geral["total"])
+        c2.metric("Sem intervenção humana", geral["autonomos"],
+                  f"{geral['autonomos'] / geral['total']:.0%}")
+        c3.metric("Exigiram confirmação", geral["com_humano"],
+                  f"{geral['com_humano'] / geral['total']:.0%}")
+        st.dataframe(df, width="stretch", hide_index=True)
+
+    # Acurácia sobre o que a própria plataforma processou. Responde "quantos
+    # tickets passaram" sem depender dos arquivos de avaliação: a ingestão grava
+    # a decisão esperada junto com a tomada, quando existe gabarito.
+    tickets = listar_tickets(AGENT_VERSION)
+    avaliados = [t for t in tickets if t.get("decisao_esperada")]
+    if avaliados:
+        acertos = [t for t in avaliados if t["decision"] == t["decisao_esperada"]]
+        st.markdown("### Acerto de decisão nos tickets processados")
+        c1, c2 = st.columns(2)
+        c1.metric("Decisão correta", f"{len(acertos)}/{len(avaliados)}",
+                  f"{len(acertos) / len(avaliados):.0%}")
+        sem_humano = [t for t in avaliados if t["status"] != "aguardando_humano"]
+        c2.metric("Concluídos sem humano", f"{len(sem_humano)}/{len(avaliados)}")
+        st.dataframe(
+            pd.DataFrame([{
+                "Ticket": t["ticket_id"],
+                "Conjunto": t.get("split") or "—",
+                "Decidiu": t["decision"],
+                "Esperado": t["decisao_esperada"],
+                "OK": "✓" if t["decision"] == t["decisao_esperada"] else "✗",
+                "Nota": f"{t['trajectory_score']:.2f}" if t.get("trajectory_score") is not None else "—",
+                "Estado": t["status"],
+            } for t in avaliados]),
+            width="stretch", hide_index=True,
+        )
+
+    historico = historico_aprovacoes(limite=20)
+    if historico:
+        st.markdown("---")
+        st.markdown("### Histórico de decisões humanas")
+        st.caption("Quem autorizou o quê — o registro que uma ação com impacto "
+                   "físico precisa deixar.")
+        st.dataframe(
+            pd.DataFrame([{
+                "Ticket": h["ticket_id"],
+                "Ação": h.get("action_type") or "—",
+                "Alvo": h.get("action_target") or "—",
+                "Decisão": h["status"],
+                "Por": h.get("resolvido_por") or "—",
+                "Quando": h["resolvido_em"].strftime("%d/%m %H:%M") if h.get("resolvido_em") else "—",
+            } for h in historico]),
+            width="stretch", hide_index=True,
+        )
 
 
 def tab_playground(cases: List[Dict[str, Any]]):
@@ -1668,9 +1752,13 @@ def main():
     elapsed = st.session_state.get(elapsed_key)
     is_interrupted = st.session_state.get(interrupted_key, False)
 
-    # Abas da Aplicação
-    pendentes_n = len(_tickets_pendentes())
-    rotulo_notif = f"🔔 Aprovações ({pendentes_n})" if pendentes_n else "🔔 Aprovações"
+    # Abas da Aplicação. O contador sai do Postgres, então marca também o que
+    # foi congelado por outro processo — a ingestão do `make demo`, por exemplo.
+    try:
+        pendentes_n = len(listar_pendencias(AGENT_VERSION))
+    except Exception:
+        pendentes_n = 0
+    rotulo_notif = f"🔔 Notificações ({pendentes_n})" if pendentes_n else "🔔 Notificações"
     tab_diag, tab_notif, tab_tr, tab_met, tab_play = st.tabs([
         "📋 Diagnóstico & HITL",
         rotulo_notif,
